@@ -25,6 +25,10 @@ GPU_IDLE_THRESHOLD=10
 # "auto" will try nvidia first, then amd, then Windows performance counters
 GPU_VENDOR=auto
 
+# Check for active SSH sessions on the host (1=enabled, 0=disabled)
+# Disable this for debugging so you can SSH in without preventing sleep
+CHECK_SSH_SESSIONS=1
+
 # Hibernation Settings
 # Maximum seconds to wait for Windows to hibernate
 HIBERNATE_TIMEOUT=300

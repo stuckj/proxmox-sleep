@@ -18,6 +18,7 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
 GPU_IDLE_THRESHOLD="${GPU_IDLE_THRESHOLD:-10}"
 CPU_IDLE_THRESHOLD="${CPU_IDLE_THRESHOLD:-15}"
 GPU_VENDOR="${GPU_VENDOR:-auto}"
+CHECK_SSH_SESSIONS="${CHECK_SSH_SESSIONS:-1}"
 LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 STATE_FILE="/tmp/proxmox-idle-monitor.state"
 
@@ -306,7 +307,7 @@ is_system_idle() {
     fi
 
     # Check 4: SSH sessions to host
-    if has_active_ssh_sessions; then
+    if [[ "$CHECK_SSH_SESSIONS" == "1" ]] && has_active_ssh_sessions; then
         debug "Active SSH sessions detected"
         return 1  # Someone is connected
     fi
@@ -440,7 +441,9 @@ check_once() {
 
     echo ""
     echo -n "SSH Sessions: "
-    if has_active_ssh_sessions; then
+    if [[ "$CHECK_SSH_SESSIONS" != "1" ]]; then
+        echo "DISABLED"
+    elif has_active_ssh_sessions; then
         echo "YES"
     else
         echo "NO"
