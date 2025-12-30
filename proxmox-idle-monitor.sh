@@ -21,6 +21,7 @@ GPU_VENDOR="${GPU_VENDOR:-auto}"
 CHECK_SSH_SESSIONS="${CHECK_SSH_SESSIONS:-1}"
 LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 STATE_FILE="/tmp/proxmox-idle-monitor.state"
+WAKE_TIME_FILE="/tmp/proxmox-idle-monitor.wake"
 
 # Gaming processes (from config or defaults)
 # Set to empty string in config to disable gaming process detection
@@ -278,6 +279,54 @@ get_power_requests_detail() {
     echo "${output:-None}"
 }
 
+# Get seconds since last wake (or very large number if no wake recorded)
+get_seconds_since_wake() {
+    if [[ ! -f "$WAKE_TIME_FILE" ]]; then
+        echo "999999999"  # No wake recorded, return large number
+        return
+    fi
+
+    local wake_time current_time
+    wake_time=$(cat "$WAKE_TIME_FILE")
+    current_time=$(date +%s)
+    echo $((current_time - wake_time))
+}
+
+# Record that system just woke up
+record_wake_time() {
+    date +%s > "$WAKE_TIME_FILE"
+    log "Wake time recorded - idle timer reset"
+}
+
+# Clear wake time
+clear_wake_time() {
+    rm -f "$WAKE_TIME_FILE"
+}
+
+# Get effective idle time (accounts for wake time)
+# If Windows idle time predates wake, use time since wake instead
+get_effective_idle_time() {
+    local win_idle seconds_since_wake
+
+    win_idle=$(get_windows_idle_time)
+    seconds_since_wake=$(get_seconds_since_wake)
+
+    if [[ "$win_idle" == "-1" ]]; then
+        echo "-1"
+        return
+    fi
+
+    # If Windows idle time > time since wake, user hasn't been active since wake
+    # So effective idle time is just time since wake
+    if [[ $win_idle -gt $seconds_since_wake ]]; then
+        debug "Windows idle ($win_idle) > time since wake ($seconds_since_wake), using wake time"
+        echo "$seconds_since_wake"
+    else
+        # User was active after wake, Windows idle time is valid
+        echo "$win_idle"
+    fi
+}
+
 # Check if system should be considered idle
 is_system_idle() {
     debug "Checking if system is idle..."
@@ -312,14 +361,14 @@ is_system_idle() {
         return 1  # Someone is connected
     fi
 
-    # Check 5: Windows idle time (most reliable but requires guest agent)
-    local win_idle
-    win_idle=$(get_windows_idle_time)
-    debug "Windows idle time: ${win_idle}s"
+    # Check 5: Effective idle time (accounts for wake time)
+    local effective_idle
+    effective_idle=$(get_effective_idle_time)
+    debug "Effective idle time: ${effective_idle}s"
     local idle_threshold_seconds=$((IDLE_THRESHOLD_MINUTES * 60))
-    if [[ "$win_idle" != "-1" ]] && [[ "$win_idle" -lt "$idle_threshold_seconds" ]]; then
-        debug "Windows user recently active (${win_idle}s < ${idle_threshold_seconds}s)"
-        return 1  # User recently active in Windows
+    if [[ "$effective_idle" != "-1" ]] && [[ "$effective_idle" -lt "$idle_threshold_seconds" ]]; then
+        debug "User recently active (${effective_idle}s < ${idle_threshold_seconds}s)"
+        return 1  # User recently active
     fi
 
     # Check 6: Gaming processes (optional extra check)
@@ -389,8 +438,9 @@ monitor_loop() {
         if is_system_idle; then
             if record_idle_state; then
                 trigger_sleep
-                # After wake, reset and continue
-                sleep 60  # Give system time to stabilize after wake
+                # After wake, record wake time to reset idle timer
+                record_wake_time
+                sleep 10  # Brief pause for system stability
             fi
         else
             reset_idle_state
@@ -415,7 +465,11 @@ check_once() {
         echo "VM CPU Usage: $(get_vm_cpu_usage)%"
 
         echo ""
-        echo "Windows Idle Time: $(get_windows_idle_time) seconds"
+        local win_idle eff_idle
+        win_idle=$(get_windows_idle_time)
+        eff_idle=$(get_effective_idle_time)
+        echo "Windows Idle Time: ${win_idle} seconds"
+        echo "Effective Idle Time: ${eff_idle} seconds (accounts for wake)"
 
         echo ""
         echo -n "Gaming Processes: "
