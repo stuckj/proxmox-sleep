@@ -162,41 +162,94 @@ has_active_ssh_sessions() {
     [[ "$sessions" -gt 0 ]]
 }
 
-# Check Windows idle time via guest agent (requires script in Windows)
+# Check Windows idle time via guest agent
+# Uses 'query user' to get idle time for the console session (where USB passthrough devices are)
 get_windows_idle_time() {
-    # Try to get Windows idle time using PowerShell via guest agent
     local result output
-    result=$(qm guest exec "$VMID" -- powershell -Command "
-        Add-Type @'
-        using System;
-        using System.Runtime.InteropServices;
-        public class IdleTime {
-            [DllImport(\"user32.dll\")]
-            static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    result=$(qm guest exec "$VMID" -- powershell -Command '
+        # query user shows idle time for each session including console
+        $output = query user 2>$null
+        if (-not $output) {
+            Write-Output "-1"
+            return
+        }
 
-            [StructLayout(LayoutKind.Sequential)]
-            struct LASTINPUTINFO {
-                public uint cbSize;
-                public uint dwTime;
-            }
+        # Find the console session line (where local KB/mouse are)
+        $consoleLine = $output | Where-Object { $_ -match "console" } | Select-Object -First 1
+        if (-not $consoleLine) {
+            # No console session, try to find any active session
+            $consoleLine = $output | Where-Object { $_ -match "Active" } | Select-Object -First 1
+        }
 
-            public static uint GetIdleSeconds() {
-                LASTINPUTINFO lii = new LASTINPUTINFO();
-                lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
-                if (GetLastInputInfo(ref lii)) {
-                    return (uint)((Environment.TickCount - lii.dwTime) / 1000);
+        if (-not $consoleLine) {
+            Write-Output "-1"
+            return
+        }
+
+        # Parse idle time - column is between STATE and LOGON TIME
+        # Format examples: "." (active), "none", "5" (minutes), "1:23" (h:mm or m:ss), "1+02:30" (days+h:m)
+        # The line format is: USERNAME  SESSIONNAME  ID  STATE  IDLE TIME  LOGON TIME
+
+        # Split by 2+ spaces to get columns
+        $parts = $consoleLine -split "\s{2,}"
+
+        # Find the idle time - its usually the 5th or 6th element depending on spacing
+        $idleStr = ""
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $part = $parts[$i].Trim()
+            # Idle time patterns: ".", "none", digits, or time format
+            if ($part -match "^(\.|none|\d+|\d+:\d+|\d+\+\d+:\d+)$") {
+                # Check if next part looks like a date (logon time)
+                if ($i + 1 -lt $parts.Count -and $parts[$i + 1] -match "\d+/\d+/\d+") {
+                    $idleStr = $part
+                    break
                 }
-                return 0;
             }
         }
-'@
-        [IdleTime]::GetIdleSeconds()
-    " 2>/dev/null)
 
-    # Parse the output
+        if (-not $idleStr -or $idleStr -eq "." -or $idleStr -eq "none") {
+            Write-Output "0"  # Active or just logged in
+            return
+        }
+
+        # Parse the idle time string to seconds
+        $seconds = 0
+        if ($idleStr -match "^(\d+)\+(\d+):(\d+)$") {
+            # Days+Hours:Minutes format
+            $seconds = [int]$matches[1] * 86400 + [int]$matches[2] * 3600 + [int]$matches[3] * 60
+        }
+        elseif ($idleStr -match "^(\d+):(\d+)$") {
+            # Could be H:MM or M:SS - query user uses H:MM for > 1 hour, M:SS otherwise
+            $first = [int]$matches[1]
+            $second = [int]$matches[2]
+            if ($first -ge 60) {
+                # Likely minutes:seconds (e.g., "90:30" would be 90 min 30 sec)
+                $seconds = $first * 60 + $second
+            } else {
+                # Under 60 in first position - check if second > 59 (then its M:SS)
+                if ($second -gt 59) {
+                    $seconds = $first * 60 + $second
+                } else {
+                    # Ambiguous - assume hours:minutes if first < 24, else minutes:seconds
+                    if ($first -lt 24) {
+                        $seconds = $first * 3600 + $second * 60
+                    } else {
+                        $seconds = $first * 60 + $second
+                    }
+                }
+            }
+        }
+        elseif ($idleStr -match "^\d+$") {
+            # Just a number - its minutes
+            $seconds = [int]$idleStr * 60
+        }
+
+        Write-Output $seconds
+    ' 2>/dev/null)
+
     output=$(parse_guest_output "$result")
     local idle_seconds
-    idle_seconds=$(echo "$output" | grep -oE '^[0-9]+' | head -1)
+    idle_seconds=$(echo "$output" | grep -oE '^-?[0-9]+' | head -1)
     echo "${idle_seconds:--1}"
 }
 
