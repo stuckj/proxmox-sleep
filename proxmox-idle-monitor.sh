@@ -51,7 +51,8 @@ log() {
 
 debug() {
     if [[ "${DEBUG:-0}" == "1" ]]; then
-        log "DEBUG: $1"
+        # Write only to log file, not stdout (to avoid polluting function return values)
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - DEBUG: $1" >> "$LOG_FILE"
     fi
 }
 
@@ -395,7 +396,7 @@ record_idle_state() {
     if [[ ! -f "$STATE_FILE" ]]; then
         echo "$current_time" > "$STATE_FILE"
         log "Started tracking idle time"
-        return
+        return 1  # Not yet time to sleep, just started tracking
     fi
 
     local idle_start
