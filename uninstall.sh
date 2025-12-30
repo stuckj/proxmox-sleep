@@ -65,7 +65,13 @@ echo -e "${GREEN}✓ Scripts removed${NC}"
 echo "Removing log files..."
 rm -f /var/log/proxmox-sleep-manager.log
 rm -f /var/log/proxmox-idle-monitor.log
+rm -f /var/log/proxmox-sleep-manager.log.* 2>/dev/null || true
+rm -f /var/log/proxmox-idle-monitor.log.* 2>/dev/null || true
 echo -e "${GREEN}✓ Log files removed${NC}"
+
+echo "Removing logrotate config..."
+rm -f /etc/logrotate.d/proxmox-sleep
+echo -e "${GREEN}✓ Logrotate config removed${NC}"
 
 echo "Removing state files..."
 rm -f /tmp/proxmox-sleep-manager.state

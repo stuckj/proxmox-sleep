@@ -107,6 +107,10 @@ touch /var/log/proxmox-idle-monitor.log
 chmod 644 /var/log/proxmox-sleep-manager.log
 chmod 644 /var/log/proxmox-idle-monitor.log
 
+# Install logrotate config
+cp "$SCRIPT_DIR/proxmox-sleep.logrotate" /etc/logrotate.d/proxmox-sleep
+echo -e "${GREEN}✓ Logrotate config installed${NC}"
+
 # Install config example if config doesn't exist
 if [[ ! -f /etc/proxmox-sleep.conf ]]; then
     cp "$SCRIPT_DIR/proxmox-sleep.conf.example" /etc/proxmox-sleep.conf
