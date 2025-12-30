@@ -518,16 +518,24 @@ status() {
     check_once
 
     echo ""
-    if [[ -f "$STATE_FILE" ]]; then
-        local idle_start
-        idle_start=$(cat "$STATE_FILE")
-        local current_time
-        current_time=$(date +%s)
-        local idle_duration=$(( (current_time - idle_start) / 60 ))
-        echo "Idle Tracking: Active for $idle_duration minutes"
-        echo "Sleep in: $((IDLE_THRESHOLD_MINUTES - idle_duration)) minutes"
+    # Check if system is currently idle
+    if is_system_idle; then
+        if [[ -f "$STATE_FILE" ]]; then
+            local idle_start
+            idle_start=$(cat "$STATE_FILE")
+            local current_time
+            current_time=$(date +%s)
+            local idle_duration=$(( (current_time - idle_start) / 60 ))
+            echo "Idle Tracking: Counting down - ${idle_duration}/${IDLE_THRESHOLD_MINUTES} minutes"
+            echo "Sleep in: $((IDLE_THRESHOLD_MINUTES - idle_duration)) minutes"
+        else
+            echo "Idle Tracking: Will start on next check"
+        fi
     else
-        echo "Idle Tracking: Not idle"
+        echo "Idle Tracking: Paused (system is active)"
+        if [[ -f "$STATE_FILE" ]]; then
+            echo "  (stale state file will be cleared on next monitor cycle)"
+        fi
     fi
 }
 
