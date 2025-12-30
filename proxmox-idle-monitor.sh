@@ -22,12 +22,25 @@ LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 STATE_FILE="/tmp/proxmox-idle-monitor.state"
 
 # Gaming processes (from config or defaults)
-DEFAULT_GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
-GAMING_PROCESSES="${GAMING_PROCESSES:-$DEFAULT_GAMING_PROCESSES}"
-# Append extra processes if defined
-if [[ -n "${EXTRA_GAMING_PROCESSES:-}" ]]; then
-    GAMING_PROCESSES="$GAMING_PROCESSES,$EXTRA_GAMING_PROCESSES"
+# Set to empty string in config to disable gaming process detection
+if [[ -z "${GAMING_PROCESSES+x}" ]]; then
+    # GAMING_PROCESSES not set at all, use defaults
+    GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
 fi
+# Append extra processes if defined and GAMING_PROCESSES is not empty
+if [[ -n "${EXTRA_GAMING_PROCESSES:-}" ]] && [[ -n "$GAMING_PROCESSES" ]]; then
+    GAMING_PROCESSES="$GAMING_PROCESSES,$EXTRA_GAMING_PROCESSES"
+elif [[ -n "${EXTRA_GAMING_PROCESSES:-}" ]]; then
+    GAMING_PROCESSES="$EXTRA_GAMING_PROCESSES"
+fi
+
+# Helper to parse JSON output from qm guest exec
+# Extracts the value from "out-data" field
+parse_guest_output() {
+    local json="$1"
+    # Remove newlines and extract out-data value
+    echo "$json" | tr -d '\n\r' | grep -oP '"out-data"\s*:\s*"\K[^"]*' | tr -d '\r\n'
+}
 
 # Logging
 log() {
@@ -49,14 +62,16 @@ vm_is_running() {
 
 # Get NVIDIA GPU usage via nvidia-smi in Windows
 get_nvidia_gpu_usage() {
-    local result
+    local result output
     result=$(qm guest exec "$VMID" -- cmd /c "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits" 2>/dev/null)
-    echo "$result" | grep -oP '"out-data":\s*"\K[0-9]+' | head -1
+    output=$(parse_guest_output "$result")
+    # Extract just the number
+    echo "$output" | grep -oE '^[0-9]+' | head -1
 }
 
 # Get AMD GPU usage via Windows performance counters
 get_amd_gpu_usage() {
-    local result
+    local result output
     # AMD GPUs expose utilization via Windows performance counters
     result=$(qm guest exec "$VMID" -- powershell -Command "
         try {
@@ -71,19 +86,21 @@ get_amd_gpu_usage() {
             } catch { -1 }
         }
     " 2>/dev/null)
-    echo "$result" | grep -oP '"out-data":\s*"\K-?[0-9]+' | head -1
+    output=$(parse_guest_output "$result")
+    echo "$output" | grep -oE '^-?[0-9]+' | head -1
 }
 
 # Get Windows performance counter GPU usage (generic fallback)
 get_perfcounter_gpu_usage() {
-    local result
+    local result output
     result=$(qm guest exec "$VMID" -- powershell -Command "
         try {
             \$gpu = Get-Counter '\\GPU Engine(*engtype_3D)\\Utilization Percentage' -ErrorAction Stop
             [math]::Round((\$gpu.CounterSamples | Measure-Object -Property CookedValue -Maximum).Maximum)
         } catch { -1 }
     " 2>/dev/null)
-    echo "$result" | grep -oP '"out-data":\s*"\K-?[0-9]+' | head -1
+    output=$(parse_guest_output "$result")
+    echo "$output" | grep -oE '^-?[0-9]+' | head -1
 }
 
 # Get GPU utilization from inside Windows VM via guest agent
@@ -121,9 +138,11 @@ get_gpu_usage() {
 
 # Get VM CPU usage from Proxmox
 get_vm_cpu_usage() {
-    # Use qm command to get VM status which includes CPU
-    local cpu
-    cpu=$(pvesh get /nodes/$(hostname)/qemu/$VMID/status/current 2>/dev/null | grep -oP '"cpu":\s*\K[0-9.]+' | head -1)
+    # Use pvesh to get VM status which includes CPU
+    local cpu json
+    json=$(pvesh get /nodes/$(hostname)/qemu/$VMID/status/current --output-format json 2>/dev/null)
+    # Handle multi-line JSON - remove newlines and parse
+    cpu=$(echo "$json" | tr -d '\n\r' | grep -oP '"cpu"\s*:\s*\K[0-9.]+' | head -1)
     if [[ -n "$cpu" ]]; then
         # Convert from 0-1 to percentage
         echo "$cpu" | awk '{printf "%.0f", $1 * 100}'
@@ -142,7 +161,7 @@ has_active_ssh_sessions() {
 # Check Windows idle time via guest agent (requires script in Windows)
 get_windows_idle_time() {
     # Try to get Windows idle time using PowerShell via guest agent
-    local result
+    local result output
     result=$(qm guest exec "$VMID" -- powershell -Command "
         Add-Type @'
         using System;
@@ -170,24 +189,33 @@ get_windows_idle_time() {
         [IdleTime]::GetIdleSeconds()
     " 2>/dev/null)
 
-    # Parse the output - look for the actual number
+    # Parse the output
+    output=$(parse_guest_output "$result")
     local idle_seconds
-    idle_seconds=$(echo "$result" | grep -oP '"out-data":\s*"\K[0-9]+' || echo "-1")
-    echo "$idle_seconds"
+    idle_seconds=$(echo "$output" | grep -oE '^[0-9]+' | head -1)
+    echo "${idle_seconds:--1}"
 }
 
 # Check if specific gaming processes are running
 check_gaming_processes() {
+    # Skip if no gaming processes configured
+    if [[ -z "$GAMING_PROCESSES" ]]; then
+        debug "Gaming process detection disabled (empty list)"
+        return 1  # No gaming processes to check = not detected
+    fi
+
     # Convert comma-separated list to array
     IFS=',' read -ra gaming_procs <<< "$GAMING_PROCESSES"
 
     # Check via guest agent
-    local processes
-    processes=$(qm guest exec "$VMID" -- powershell -Command "Get-Process | Select-Object -ExpandProperty Name" 2>/dev/null)
+    local result processes
+    result=$(qm guest exec "$VMID" -- powershell -Command "Get-Process | Select-Object -ExpandProperty Name" 2>/dev/null)
+    processes=$(parse_guest_output "$result")
 
     for proc in "${gaming_procs[@]}"; do
         # Trim whitespace and remove .exe extension for matching
         proc=$(echo "$proc" | xargs)
+        [[ -z "$proc" ]] && continue
         local proc_name="${proc%.exe}"
         if echo "$processes" | grep -qi "$proc_name"; then
             debug "Found gaming process: $proc"
@@ -333,7 +361,9 @@ check_once() {
 
         echo ""
         echo -n "Gaming Processes: "
-        if check_gaming_processes; then
+        if [[ -z "$GAMING_PROCESSES" ]]; then
+            echo "DISABLED"
+        elif check_gaming_processes; then
             echo "DETECTED"
         else
             echo "none"
