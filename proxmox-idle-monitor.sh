@@ -226,6 +226,57 @@ check_gaming_processes() {
     return 1  # No gaming processes found
 }
 
+# Check if any Windows process is requesting the system stay awake
+# This catches media players, downloads, presentations, etc.
+check_power_requests() {
+    local result output
+    result=$(qm guest exec "$VMID" -- powershell -Command '
+        $requests = powercfg /requests
+        $hasRequests = $false
+        $currentCategory = ""
+        foreach ($line in $requests -split "`n") {
+            $line = $line.Trim()
+            if ($line -match "^(DISPLAY|SYSTEM|AWAYMODE|EXECUTION|PERFBOOST):") {
+                $currentCategory = $line
+            }
+            elseif ($line -and $line -ne "None." -and $currentCategory) {
+                $hasRequests = $true
+                break
+            }
+        }
+        if ($hasRequests) { "ACTIVE" } else { "NONE" }
+    ' 2>/dev/null)
+    output=$(parse_guest_output "$result")
+
+    if [[ "$output" == "ACTIVE" ]]; then
+        debug "Windows power requests active (process keeping system awake)"
+        return 0  # Power request active
+    fi
+    return 1  # No power requests
+}
+
+# Get details of active power requests (for display)
+get_power_requests_detail() {
+    local result output
+    result=$(qm guest exec "$VMID" -- powershell -Command '
+        $requests = powercfg /requests
+        $active = @()
+        $currentCategory = ""
+        foreach ($line in $requests -split "`n") {
+            $line = $line.Trim()
+            if ($line -match "^(DISPLAY|SYSTEM|AWAYMODE|EXECUTION|PERFBOOST):") {
+                $currentCategory = $line -replace ":",""
+            }
+            elseif ($line -and $line -ne "None." -and $currentCategory) {
+                $active += "$currentCategory : $line"
+            }
+        }
+        if ($active.Count -gt 0) { $active -join "; " } else { "None" }
+    ' 2>/dev/null)
+    output=$(parse_guest_output "$result")
+    echo "${output:-None}"
+}
+
 # Check if system should be considered idle
 is_system_idle() {
     debug "Checking if system is idle..."
@@ -274,6 +325,12 @@ is_system_idle() {
     if check_gaming_processes; then
         debug "Gaming processes detected"
         return 1  # Gaming in progress
+    fi
+
+    # Check 7: Windows power requests (media players, downloads, etc.)
+    if check_power_requests; then
+        debug "Windows power requests active"
+        return 1  # Something is keeping Windows awake
     fi
 
     debug "System appears idle"
@@ -365,6 +422,15 @@ check_once() {
             echo "DISABLED"
         elif check_gaming_processes; then
             echo "DETECTED"
+        else
+            echo "none"
+        fi
+
+        echo ""
+        echo -n "Power Requests: "
+        if check_power_requests; then
+            echo "ACTIVE"
+            echo "  $(get_power_requests_detail)"
         else
             echo "none"
         fi
