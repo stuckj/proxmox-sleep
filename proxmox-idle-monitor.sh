@@ -770,17 +770,23 @@ case "${1:-}" in
         reset_idle_state
         echo "Idle state reset"
         ;;
+    sleep-now)
+        echo "Triggering immediate sleep..."
+        reset_idle_state
+        systemctl suspend
+        ;;
     install-helper)
         install_windows_idle_helper
         ;;
     *)
-        echo "Usage: $0 {start|check|status|reset|install-helper}"
+        echo "Usage: $0 {start|check|status|reset|sleep-now|install-helper}"
         echo ""
         echo "Commands:"
         echo "  start          - Start the monitoring daemon"
         echo "  check          - One-time idle check (for testing)"
         echo "  status         - Show current status"
         echo "  reset          - Reset idle tracking"
+        echo "  sleep-now      - Immediately hibernate VM and sleep the host"
         echo "  install-helper - Install Windows idle helper (required for KB/mouse tracking)"
         echo ""
         echo "Configuration:"
