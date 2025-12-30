@@ -1,0 +1,50 @@
+# Proxmox Sleep Manager Configuration
+# Copy this file to /etc/proxmox-sleep.conf and customize
+
+# VM Configuration
+# The Proxmox VM ID of your Windows VM
+VMID=100
+
+# VM name (used for logging only)
+VM_NAME="windows"
+
+# Idle Monitor Settings
+# Minutes of idle time before auto-sleep (0 to disable auto-sleep)
+IDLE_THRESHOLD_MINUTES=15
+
+# Check interval in seconds
+CHECK_INTERVAL=60
+
+# CPU usage threshold (percentage) - VM is "active" if above this
+CPU_IDLE_THRESHOLD=15
+
+# GPU usage threshold (percentage) - VM is "active" if above this
+GPU_IDLE_THRESHOLD=10
+
+# GPU vendor in the Windows VM: "nvidia", "amd", or "auto"
+# "auto" will try nvidia first, then amd, then Windows performance counters
+GPU_VENDOR=auto
+
+# Hibernation Settings
+# Maximum seconds to wait for Windows to hibernate
+HIBERNATE_TIMEOUT=300
+
+# Seconds to wait after host wake before starting VM
+WAKE_DELAY=5
+
+# Gaming Process Detection
+# Comma-separated list of process names that indicate gaming activity
+# The system won't auto-sleep if any of these are running
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
+
+# Additional processes to check (will be merged with GAMING_PROCESSES)
+# Use this to add your specific games without modifying the defaults
+EXTRA_GAMING_PROCESSES=""
+
+# Logging
+# Log file locations
+SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
+IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
+
+# Enable debug logging (1=enabled, 0=disabled)
+DEBUG=0

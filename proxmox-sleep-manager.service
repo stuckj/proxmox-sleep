@@ -1,0 +1,15 @@
+[Unit]
+Description=Proxmox Sleep Manager - Hibernate Windows VM on sleep
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="PROXMOX_VMID=__VMID__"
+Environment="PROXMOX_VM_NAME=__VM_NAME__"
+ExecStart=/usr/local/bin/proxmox-sleep-manager.sh post-wake
+ExecStop=/usr/local/bin/proxmox-sleep-manager.sh pre-sleep
+
+[Install]
+WantedBy=sleep.target
