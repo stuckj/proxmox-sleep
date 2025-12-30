@@ -6,6 +6,8 @@ StopWhenUnneeded=yes
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Give hibernation time to complete (default systemd timeout is too short)
+TimeoutStopSec=600
 Environment="PROXMOX_VMID=__VMID__"
 Environment="PROXMOX_VM_NAME=__VM_NAME__"
 ExecStart=/usr/local/bin/proxmox-sleep-manager.sh post-wake
