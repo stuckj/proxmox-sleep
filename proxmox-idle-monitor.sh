@@ -41,7 +41,8 @@ fi
 parse_guest_output() {
     local json="$1"
     # Remove newlines and extract out-data value
-    echo "$json" | tr -d '\n\r' | grep -oP '"out-data"\s*:\s*"\K[^"]*' | tr -d '\r\n'
+    # Also remove literal \r\n sequences from the JSON-escaped output
+    echo "$json" | tr -d '\n\r' | grep -oP '"out-data"\s*:\s*"\K[^"]*' | sed 's/\\r\\n//g; s/\\r//g; s/\\n//g'
 }
 
 # Logging
