@@ -52,9 +52,11 @@ powercfg /hibernate on
 
 ## Installation
 
+### Step 1: Install on Proxmox Host
+
 ```bash
 # Clone or copy files to your Proxmox host
-git clone https://github.com/YOUR_USERNAME/proxmox-sleep.git
+git clone https://github.com/stuckj/proxmox-sleep.git
 cd proxmox-sleep
 
 # Run installer (as root)
@@ -68,6 +70,25 @@ The installer will:
 - Create config file at `/etc/proxmox-sleep.conf`
 - Configure and enable systemd services
 - Optionally enable auto-sleep monitoring
+
+### Step 2: Install Windows Idle Helper (Required)
+
+> **Important**: This step is required for proper keyboard/mouse idle detection with USB passthrough devices.
+
+The QEMU guest agent runs as SYSTEM in Windows session 0, which cannot detect user input from USB passthrough keyboards and mice. A small helper application must run in your Windows user session to track idle time.
+
+From the Proxmox host, run:
+```bash
+proxmox-idle-monitor.sh install-helper
+```
+
+This installs a Windows scheduled task that:
+- Runs automatically at user logon
+- Displays a **system tray icon** showing current idle time (hover to see)
+- Updates idle time every 10 seconds
+- Can be exited by right-clicking the tray icon
+
+The tray icon appears as an "i" (information) icon and shows "Idle: Xm Ys" when you hover over it.
 
 ## Manual Installation
 
@@ -95,25 +116,42 @@ systemctl enable --now proxmox-idle-monitor.service
 
 ### Check Status
 ```bash
-# Sleep manager status
-proxmox-sleep-manager.sh status
+# Full status with idle tracking info
+proxmox-idle-monitor.sh status
 
-# Idle monitor status (is system idle right now?)
+# Quick idle check (for testing)
 proxmox-idle-monitor.sh check
 
 # Detailed debug output
 DEBUG=1 proxmox-idle-monitor.sh check
+
+# Sleep manager status
+proxmox-sleep-manager.sh status
 ```
 
-### Manual Operations
+### Sleep Now (Manual Sleep)
 ```bash
-# Hibernate the VM manually
+# Immediately hibernate VM and sleep the host
+proxmox-idle-monitor.sh sleep-now
+```
+
+This is useful for:
+- Testing the sleep/wake cycle
+- Manually sleeping the machine without waiting for idle timeout
+- Quick shutdown when leaving
+
+### Other Operations
+```bash
+# Hibernate the VM only (without sleeping host)
 proxmox-sleep-manager.sh hibernate
 
-# Sleep the host (will trigger VM hibernation)
-systemctl suspend
+# Reset idle tracking (restart the countdown)
+proxmox-idle-monitor.sh reset
 
-# Wake: use WoL or press power button
+# Reinstall Windows idle helper
+proxmox-idle-monitor.sh install-helper
+
+# Wake: use Wake-on-LAN or press power button
 ```
 
 ### Logs
@@ -158,15 +196,38 @@ Environment variables override config file settings, which override defaults.
 
 The idle monitor checks multiple signals:
 
-| Check | Method | GPU Support |
-|-------|--------|-------------|
-| VM CPU Usage | Proxmox API | N/A |
-| GPU Usage | Guest Agent | NVIDIA, AMD |
-| Windows Idle Time | Guest Agent (user32.dll) | N/A |
-| Gaming Processes | Guest Agent (Get-Process) | N/A |
-| SSH Sessions | Host `who` command | N/A |
+| Check | Method | Notes |
+|-------|--------|-------|
+| VM CPU Usage | Proxmox API | Above threshold = active |
+| GPU Usage | Guest Agent (nvidia-smi/perf counters) | NVIDIA, AMD supported |
+| Windows Idle Time | Tray Helper App | Requires install-helper |
+| Windows Power Requests | Guest Agent (powercfg) | Media players, downloads, etc. |
+| Gaming Processes | Guest Agent (Get-Process) | Configurable process list |
+| SSH Sessions | Host `who` command | Optional, can disable |
 
 All must indicate "idle" for the configured duration before triggering sleep.
+
+### Windows Idle Helper
+
+The idle helper is essential for accurate keyboard/mouse detection. Without it:
+- The system falls back to screensaver/lock detection only
+- USB passthrough input won't be detected
+- The system may sleep while you're actively using it
+
+The helper runs silently with a system tray icon. If the icon is missing, reinstall:
+```bash
+proxmox-idle-monitor.sh install-helper
+```
+
+### Power Request Filtering
+
+Windows applications can request the system stay awake (e.g., media players, downloads). The idle monitor detects these via `powercfg /requests`.
+
+Some system-level requests are filtered as noise:
+- "Legacy Kernel Caller" - AMD CPU power management
+- "Sleep Idle State Disabled" - System idle tracking
+
+These don't indicate real user activity and are ignored.
 
 ### GPU Detection
 
@@ -213,6 +274,20 @@ Native sleep is ideal but often problematic with NVIDIA GPUs. This hibernation-b
 # Debug mode shows all checks
 DEBUG=1 proxmox-idle-monitor.sh check
 ```
+
+### Windows Idle Time shows -1 or 99999
+The Windows idle helper isn't running or isn't installed:
+```bash
+# Install/reinstall the helper
+proxmox-idle-monitor.sh install-helper
+```
+
+Then log out and back in to Windows, or check Task Scheduler for "ProxmoxIdleHelper".
+
+### Tray icon not visible
+- Check Windows system tray overflow (click the ^ arrow)
+- The icon appears as an "i" (information icon)
+- Right-click to exit, then restart via Task Scheduler or re-run install-helper
 
 ### GPU usage not detected
 ```bash
