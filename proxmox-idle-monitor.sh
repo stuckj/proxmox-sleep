@@ -158,99 +158,223 @@ get_vm_cpu_usage() {
 # Check if there are active SSH sessions to the host
 has_active_ssh_sessions() {
     local sessions
-    sessions=$(who | grep -c pts 2>/dev/null || echo "0")
-    [[ "$sessions" -gt 0 ]]
+    # Use head -1 to ensure single line, and default to 0 if empty
+    sessions=$(who | grep -c pts 2>/dev/null | head -1)
+    sessions="${sessions:-0}"
+    [[ "$sessions" =~ ^[0-9]+$ ]] && [[ "$sessions" -gt 0 ]]
 }
 
 # Check Windows idle time via guest agent
-# Uses 'query user' to get idle time for the console session (where USB passthrough devices are)
+# Reads from a file that's updated by a helper running in the user's session
+# Falls back to screensaver/lock detection if helper isn't installed
 get_windows_idle_time() {
-    local result output
+    local result output idle_seconds
+
+    # First, try to read from the idle helper file (updated by user-session helper)
     result=$(qm guest exec "$VMID" -- powershell -Command '
-        # query user shows idle time for each session including console
-        $output = query user 2>$null
-        if (-not $output) {
-            Write-Output "-1"
-            return
-        }
-
-        # Find the console session line (where local KB/mouse are)
-        $consoleLine = $output | Where-Object { $_ -match "console" } | Select-Object -First 1
-        if (-not $consoleLine) {
-            # No console session, try to find any active session
-            $consoleLine = $output | Where-Object { $_ -match "Active" } | Select-Object -First 1
-        }
-
-        if (-not $consoleLine) {
-            Write-Output "-1"
-            return
-        }
-
-        # Parse idle time - column is between STATE and LOGON TIME
-        # Format examples: "." (active), "none", "5" (minutes), "1:23" (h:mm or m:ss), "1+02:30" (days+h:m)
-        # The line format is: USERNAME  SESSIONNAME  ID  STATE  IDLE TIME  LOGON TIME
-
-        # Split by 2+ spaces to get columns
-        $parts = $consoleLine -split "\s{2,}"
-
-        # Find the idle time - its usually the 5th or 6th element depending on spacing
-        $idleStr = ""
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            $part = $parts[$i].Trim()
-            # Idle time patterns: ".", "none", digits, or time format
-            if ($part -match "^(\.|none|\d+|\d+:\d+|\d+\+\d+:\d+)$") {
-                # Check if next part looks like a date (logon time)
-                if ($i + 1 -lt $parts.Count -and $parts[$i + 1] -match "\d+/\d+/\d+") {
-                    $idleStr = $part
-                    break
-                }
+        $idleFile = "$env:ProgramData\proxmox-idle\idle_seconds.txt"
+        if (Test-Path $idleFile) {
+            $content = Get-Content $idleFile -ErrorAction SilentlyContinue
+            $fileTime = (Get-Item $idleFile).LastWriteTime
+            $age = (Get-Date) - $fileTime
+            # If file is fresh (< 30 seconds old), use it
+            if ($age.TotalSeconds -lt 30) {
+                Write-Output $content
+                return
             }
         }
-
-        if (-not $idleStr -or $idleStr -eq "." -or $idleStr -eq "none") {
-            Write-Output "0"  # Active or just logged in
-            return
-        }
-
-        # Parse the idle time string to seconds
-        $seconds = 0
-        if ($idleStr -match "^(\d+)\+(\d+):(\d+)$") {
-            # Days+Hours:Minutes format
-            $seconds = [int]$matches[1] * 86400 + [int]$matches[2] * 3600 + [int]$matches[3] * 60
-        }
-        elseif ($idleStr -match "^(\d+):(\d+)$") {
-            # Could be H:MM or M:SS - query user uses H:MM for > 1 hour, M:SS otherwise
-            $first = [int]$matches[1]
-            $second = [int]$matches[2]
-            if ($first -ge 60) {
-                # Likely minutes:seconds (e.g., "90:30" would be 90 min 30 sec)
-                $seconds = $first * 60 + $second
-            } else {
-                # Under 60 in first position - check if second > 59 (then its M:SS)
-                if ($second -gt 59) {
-                    $seconds = $first * 60 + $second
-                } else {
-                    # Ambiguous - assume hours:minutes if first < 24, else minutes:seconds
-                    if ($first -lt 24) {
-                        $seconds = $first * 3600 + $second * 60
-                    } else {
-                        $seconds = $first * 60 + $second
-                    }
-                }
-            }
-        }
-        elseif ($idleStr -match "^\d+$") {
-            # Just a number - its minutes
-            $seconds = [int]$idleStr * 60
-        }
-
-        Write-Output $seconds
+        # Helper not running or stale - return -1
+        Write-Output "-1"
     ' 2>/dev/null)
 
     output=$(parse_guest_output "$result")
-    local idle_seconds
+    idle_seconds=$(echo "$output" | grep -oE '^-?[0-9]+' | head -1)
+
+    # If we got a valid value from the helper, use it
+    if [[ -n "$idle_seconds" ]] && [[ "$idle_seconds" != "-1" ]]; then
+        echo "$idle_seconds"
+        return
+    fi
+
+    # Fallback: Check screensaver/lock status
+    # If screensaver is running or screen is locked, consider very idle
+    result=$(qm guest exec "$VMID" -- powershell -Command '
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class ScreenStatus {
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref bool pvParam, uint fWinIni);
+    const uint SPI_GETSCREENSAVERRUNNING = 0x0072;
+    public static bool IsScreensaverRunning() {
+        bool running = false;
+        SystemParametersInfo(SPI_GETSCREENSAVERRUNNING, 0, ref running, 0);
+        return running;
+    }
+}
+"@
+        $ssRunning = [ScreenStatus]::IsScreensaverRunning()
+        $locked = (Get-Process -Name LogonUI -ErrorAction SilentlyContinue) -ne $null
+
+        if ($ssRunning -or $locked) {
+            # Screensaver/lock = very idle, return large value
+            Write-Output "99999"
+        } else {
+            # Cannot determine - return -1
+            Write-Output "-1"
+        }
+    ' 2>/dev/null)
+
+    output=$(parse_guest_output "$result")
     idle_seconds=$(echo "$output" | grep -oE '^-?[0-9]+' | head -1)
     echo "${idle_seconds:--1}"
+}
+
+# Install the idle helper in Windows (run once)
+install_windows_idle_helper() {
+    echo "Installing Windows idle helper in VM $VMID..."
+
+    # First, create the helper script by writing it in parts to avoid escaping issues
+    qm guest exec "$VMID" -- powershell -Command '
+        $helperDir = "$env:ProgramData\proxmox-idle"
+        if (-not (Test-Path $helperDir)) {
+            New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+        }
+
+        # Write the C# code to a separate file
+        $csCode = @"
+using System;
+using System.Runtime.InteropServices;
+public class IdleTime {
+    [DllImport("user32.dll")]
+    static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [StructLayout(LayoutKind.Sequential)]
+    struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+    public static uint GetIdleSeconds() {
+        LASTINPUTINFO lii = new LASTINPUTINFO();
+        lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+        if (GetLastInputInfo(ref lii)) { return (uint)((Environment.TickCount - lii.dwTime) / 1000); }
+        return 0;
+    }
+}
+"@
+        $csCode | Set-Content "$helperDir\IdleTime.cs" -Force
+        Write-Output "CS file created"
+    ' 2>&1
+
+    # Now create the main script with tray icon
+    qm guest exec "$VMID" -- powershell -Command '
+        $helperDir = "$env:ProgramData\proxmox-idle"
+        $script = @"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Load idle time code
+`$csCode = Get-Content "`$env:ProgramData\proxmox-idle\IdleTime.cs" -Raw
+Add-Type -TypeDefinition `$csCode
+
+# Create tray icon
+`$trayIcon = New-Object System.Windows.Forms.NotifyIcon
+`$trayIcon.Icon = [System.Drawing.SystemIcons]::Information
+`$trayIcon.Text = "Proxmox Idle Monitor"
+`$trayIcon.Visible = `$true
+
+# Create context menu
+`$contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+`$exitItem = `$contextMenu.Items.Add("Exit")
+`$exitItem.Add_Click({
+    `$trayIcon.Visible = `$false
+    [System.Windows.Forms.Application]::Exit()
+})
+`$trayIcon.ContextMenuStrip = `$contextMenu
+
+# Timer to update idle time
+`$timer = New-Object System.Windows.Forms.Timer
+`$timer.Interval = 10000
+`$timer.Add_Tick({
+    try {
+        `$idle = [IdleTime]::GetIdleSeconds()
+        `$idle | Set-Content "`$env:ProgramData\proxmox-idle\idle_seconds.txt" -Force
+        `$mins = [math]::Floor(`$idle / 60)
+        `$secs = `$idle % 60
+        `$trayIcon.Text = "Idle: `${mins}m `${secs}s"
+    } catch {}
+})
+`$timer.Start()
+
+# Initial update
+try {
+    `$idle = [IdleTime]::GetIdleSeconds()
+    `$idle | Set-Content "`$env:ProgramData\proxmox-idle\idle_seconds.txt" -Force
+} catch {}
+
+# Run message loop
+[System.Windows.Forms.Application]::Run()
+"@
+        $script | Set-Content "$helperDir\idle_helper.ps1" -Force
+        Write-Output "Script file created"
+    ' 2>&1
+
+    # Create a VBScript wrapper to launch PowerShell completely hidden (no window flash)
+    qm guest exec "$VMID" -- powershell -Command '
+        $helperDir = "$env:ProgramData\proxmox-idle"
+        $vbs = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & Replace(WScript.ScriptFullName, ".vbs", ".ps1") & """", 0, False
+"@
+        $vbs | Set-Content "$helperDir\idle_helper.vbs" -Force
+        Write-Output "VBS launcher created"
+    ' 2>&1
+
+    # Create and start the scheduled task using the VBS wrapper
+    qm guest exec "$VMID" -- powershell -Command '
+        $helperDir = "$env:ProgramData\proxmox-idle"
+        $helperVbs = "$helperDir\idle_helper.vbs"
+
+        # Create scheduled task to run at logon using wscript (completely hidden)
+        $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //NoLogo `"$helperVbs`""
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Users" -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 9999)
+
+        # Remove old task if exists
+        Unregister-ScheduledTask -TaskName "ProxmoxIdleHelper" -Confirm:$false -ErrorAction SilentlyContinue
+
+        # Register new task
+        Register-ScheduledTask -TaskName "ProxmoxIdleHelper" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+
+        # Kill any existing helper processes
+        Get-Process -Name powershell -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
+                if ($cmdLine -like "*idle_helper*") {
+                    Stop-Process -Id $_.Id -Force
+                }
+            } catch {}
+        }
+
+        # Start it now for current session
+        Start-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction SilentlyContinue
+
+        Write-Output "Task created and started"
+    ' 2>&1
+
+    echo "Waiting for helper to initialize..."
+    sleep 5
+
+    # Verify it's working
+    local result
+    result=$(qm guest exec "$VMID" -- powershell -Command '
+        $idleFile = "$env:ProgramData\proxmox-idle\idle_seconds.txt"
+        if (Test-Path $idleFile) {
+            "OK: " + (Get-Content $idleFile)
+        } else {
+            "FAIL: File not created. Checking task status..."
+            $task = Get-ScheduledTaskInfo -TaskName ProxmoxIdleHelper
+            "Last result: " + $task.LastTaskResult
+        }
+    ' 2>/dev/null)
+    echo "Result: $(parse_guest_output "$result")"
 }
 
 # Check if specific gaming processes are running
@@ -285,12 +409,20 @@ check_gaming_processes() {
 
 # Check if any Windows process is requesting the system stay awake
 # This catches media players, downloads, presentations, etc.
+# Filters out known system noise like AMD CPU power management
 check_power_requests() {
     local result output
     result=$(qm guest exec "$VMID" -- powershell -Command '
         $requests = powercfg /requests
         $hasRequests = $false
         $currentCategory = ""
+
+        # Known noise patterns to ignore (AMD CPU power management, etc.)
+        $ignorePatterns = @(
+            "Legacy Kernel Caller",
+            "Sleep Idle State Disabled"
+        )
+
         foreach ($line in $requests -split "`n") {
             $line = $line.Trim()
             # Match any category header (DISPLAY:, SYSTEM:, ACTIVELOCKSCREEN:, etc.)
@@ -298,8 +430,18 @@ check_power_requests() {
                 $currentCategory = $line
             }
             elseif ($line -and $line -ne "None." -and $currentCategory) {
-                $hasRequests = $true
-                break
+                # Check if this matches any ignore pattern
+                $ignore = $false
+                foreach ($pattern in $ignorePatterns) {
+                    if ($line -like "*$pattern*") {
+                        $ignore = $true
+                        break
+                    }
+                }
+                if (-not $ignore) {
+                    $hasRequests = $true
+                    break
+                }
             }
         }
         if ($hasRequests) { "ACTIVE" } else { "NONE" }
@@ -314,12 +456,20 @@ check_power_requests() {
 }
 
 # Get details of active power requests (for display)
+# Filters out known system noise
 get_power_requests_detail() {
     local result output
     result=$(qm guest exec "$VMID" -- powershell -Command '
         $requests = powercfg /requests
         $active = @()
         $currentCategory = ""
+
+        # Known noise patterns to ignore
+        $ignorePatterns = @(
+            "Legacy Kernel Caller",
+            "Sleep Idle State Disabled"
+        )
+
         foreach ($line in $requests -split "`n") {
             $line = $line.Trim()
             # Match any category header (DISPLAY:, SYSTEM:, ACTIVELOCKSCREEN:, etc.)
@@ -327,7 +477,17 @@ get_power_requests_detail() {
                 $currentCategory = $line -replace ":$",""
             }
             elseif ($line -and $line -ne "None." -and $currentCategory) {
-                $active += "$currentCategory : $line"
+                # Check if this matches any ignore pattern
+                $ignore = $false
+                foreach ($pattern in $ignorePatterns) {
+                    if ($line -like "*$pattern*") {
+                        $ignore = $true
+                        break
+                    }
+                }
+                if (-not $ignore) {
+                    $active += "$currentCategory : $line"
+                }
             }
         }
         if ($active.Count -gt 0) { $active -join "; " } else { "None" }
@@ -610,14 +770,18 @@ case "${1:-}" in
         reset_idle_state
         echo "Idle state reset"
         ;;
+    install-helper)
+        install_windows_idle_helper
+        ;;
     *)
-        echo "Usage: $0 {start|check|status|reset}"
+        echo "Usage: $0 {start|check|status|reset|install-helper}"
         echo ""
         echo "Commands:"
-        echo "  start   - Start the monitoring daemon"
-        echo "  check   - One-time idle check (for testing)"
-        echo "  status  - Show current status"
-        echo "  reset   - Reset idle tracking"
+        echo "  start          - Start the monitoring daemon"
+        echo "  check          - One-time idle check (for testing)"
+        echo "  status         - Show current status"
+        echo "  reset          - Reset idle tracking"
+        echo "  install-helper - Install Windows idle helper (required for KB/mouse tracking)"
         echo ""
         echo "Configuration:"
         echo "  Config file: /etc/proxmox-sleep.conf"
