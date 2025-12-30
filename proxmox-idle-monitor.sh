@@ -240,7 +240,8 @@ check_power_requests() {
         $currentCategory = ""
         foreach ($line in $requests -split "`n") {
             $line = $line.Trim()
-            if ($line -match "^(DISPLAY|SYSTEM|AWAYMODE|EXECUTION|PERFBOOST):") {
+            # Match any category header (DISPLAY:, SYSTEM:, ACTIVELOCKSCREEN:, etc.)
+            if ($line -match "^[A-Z]+:$") {
                 $currentCategory = $line
             }
             elseif ($line -and $line -ne "None." -and $currentCategory) {
@@ -268,8 +269,9 @@ get_power_requests_detail() {
         $currentCategory = ""
         foreach ($line in $requests -split "`n") {
             $line = $line.Trim()
-            if ($line -match "^(DISPLAY|SYSTEM|AWAYMODE|EXECUTION|PERFBOOST):") {
-                $currentCategory = $line -replace ":",""
+            # Match any category header (DISPLAY:, SYSTEM:, ACTIVELOCKSCREEN:, etc.)
+            if ($line -match "^[A-Z]+:$") {
+                $currentCategory = $line -replace ":$",""
             }
             elseif ($line -and $line -ne "None." -and $currentCategory) {
                 $active += "$currentCategory : $line"
