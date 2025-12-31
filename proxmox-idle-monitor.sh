@@ -360,14 +360,37 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
                 $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
                 if ($cmdLine -like "*idle_helper*") {
                     Stop-Process -Id $_.Id -Force
+                    Write-Output "Stopped existing helper process"
                 }
             } catch {}
         }
 
-        # Start it now for current session
-        Start-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction SilentlyContinue
+        # Small delay to ensure task is fully registered
+        Start-Sleep -Seconds 1
 
-        Write-Output "Task created and started"
+        # Start it now for current session (retry a few times)
+        $started = $false
+        for ($i = 0; $i -lt 3; $i++) {
+            try {
+                Start-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction Stop
+                Start-Sleep -Seconds 2
+                $task = Get-ScheduledTask -TaskName "ProxmoxIdleHelper"
+                if ($task.State -eq "Running") {
+                    Write-Output "Task started successfully"
+                    $started = $true
+                    break
+                }
+            } catch {
+                Write-Output "Start attempt $($i+1) failed, retrying..."
+                Start-Sleep -Seconds 1
+            }
+        }
+
+        if (-not $started) {
+            Write-Output "Warning: Task registered but may need manual start or re-login"
+        }
+
+        Write-Output "Task created"
     ' 2>&1
 
     echo "Waiting for helper to initialize..."
