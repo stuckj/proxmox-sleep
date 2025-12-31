@@ -377,6 +377,46 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
     echo "Result: $(parse_guest_output "$result")"
 }
 
+# Uninstall the idle helper from Windows
+uninstall_windows_idle_helper() {
+    echo "Uninstalling Windows idle helper from VM $VMID..."
+
+    qm guest exec "$VMID" -- powershell -Command '
+        # Stop any running helper processes
+        Get-Process -Name powershell -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
+                if ($cmdLine -like "*idle_helper*") {
+                    Stop-Process -Id $_.Id -Force
+                    Write-Output "Stopped helper process $($_.Id)"
+                }
+            } catch {}
+        }
+
+        # Remove scheduled task
+        $task = Get-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName "ProxmoxIdleHelper" -Confirm:$false
+            Write-Output "Removed scheduled task"
+        } else {
+            Write-Output "Scheduled task not found"
+        }
+
+        # Remove helper files
+        $helperDir = "$env:ProgramData\proxmox-idle"
+        if (Test-Path $helperDir) {
+            Remove-Item -Path $helperDir -Recurse -Force
+            Write-Output "Removed helper files from $helperDir"
+        } else {
+            Write-Output "Helper directory not found"
+        }
+
+        Write-Output "Uninstall complete"
+    ' 2>&1
+
+    echo "Done."
+}
+
 # Check if specific gaming processes are running
 check_gaming_processes() {
     # Skip if no gaming processes configured
@@ -778,16 +818,20 @@ case "${1:-}" in
     install-helper)
         install_windows_idle_helper
         ;;
+    uninstall-helper)
+        uninstall_windows_idle_helper
+        ;;
     *)
-        echo "Usage: $0 {start|check|status|reset|sleep-now|install-helper}"
+        echo "Usage: $0 {start|check|status|reset|sleep-now|install-helper|uninstall-helper}"
         echo ""
         echo "Commands:"
-        echo "  start          - Start the monitoring daemon"
-        echo "  check          - One-time idle check (for testing)"
-        echo "  status         - Show current status"
-        echo "  reset          - Reset idle tracking"
-        echo "  sleep-now      - Immediately hibernate VM and sleep the host"
-        echo "  install-helper - Install Windows idle helper (required for KB/mouse tracking)"
+        echo "  start            - Start the monitoring daemon"
+        echo "  check            - One-time idle check (for testing)"
+        echo "  status           - Show current status"
+        echo "  reset            - Reset idle tracking"
+        echo "  sleep-now        - Immediately hibernate VM and sleep the host"
+        echo "  install-helper   - Install Windows idle helper (required for KB/mouse tracking)"
+        echo "  uninstall-helper - Remove Windows idle helper from VM"
         echo ""
         echo "Configuration:"
         echo "  Config file: /etc/proxmox-sleep.conf"
