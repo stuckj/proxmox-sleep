@@ -91,17 +91,37 @@ hibernate_vm() {
     qm guest exec "$VMID" -- cmd /c "shutdown /h" &>/dev/null
 
     # Wait for VM to actually stop (hibernation completes)
+    # We need to confirm it stays stopped to avoid race conditions
     local waited=0
+    local consecutive_stopped=0
+    local required_stopped=3  # Require 3 consecutive "stopped" checks (15 seconds)
+
     while [[ $waited -lt $HIBERNATE_TIMEOUT ]]; do
         sleep 5
         waited=$((waited + 5))
 
-        if ! vm_is_running; then
-            log "VM hibernation complete (took ${waited}s)"
-            return 0
-        fi
+        local current_status
+        current_status=$(qm status "$VMID" 2>/dev/null | awk '{print $2}')
+        log "VM status after ${waited}s: $current_status"
 
-        log "Still waiting for hibernation... (${waited}s)"
+        if [[ "$current_status" != "running" ]]; then
+            consecutive_stopped=$((consecutive_stopped + 1))
+            log "VM not running (check $consecutive_stopped of $required_stopped)"
+
+            if [[ $consecutive_stopped -ge $required_stopped ]]; then
+                # Double-check QEMU process is gone
+                if ! pgrep -f "qemu.*-id $VMID" > /dev/null 2>&1; then
+                    log "VM hibernation confirmed complete (took ${waited}s)"
+                    return 0
+                else
+                    log "QEMU process still exists, continuing to wait..."
+                    consecutive_stopped=0
+                fi
+            fi
+        else
+            consecutive_stopped=0
+            log "Still waiting for hibernation..."
+        fi
     done
 
     log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s"
@@ -126,7 +146,29 @@ resume_vm() {
 
     case "$prev_state" in
         hibernated|was_shutdown)
-            log "VM was $prev_state before sleep, starting it..."
+            log "VM was $prev_state before sleep"
+
+            # Check if VM is already running (shouldn't happen, but handle it)
+            if vm_is_running; then
+                log "WARNING: VM is already running - hibernation may not have completed"
+                log "Waiting to see if VM stops (hibernation completing)..."
+
+                # Wait up to 60 seconds for hibernation to complete
+                local wait_count=0
+                while vm_is_running && [[ $wait_count -lt 12 ]]; do
+                    sleep 5
+                    wait_count=$((wait_count + 1))
+                    log "VM still running, waiting... ($((wait_count * 5))s)"
+                done
+
+                if vm_is_running; then
+                    log "VM remained running - assuming it's operational"
+                    return 0
+                else
+                    log "VM stopped (hibernation completed late), now starting..."
+                fi
+            fi
+
             sleep "$WAKE_DELAY"  # Give system time to stabilize
             qm start "$VMID"
 
@@ -134,7 +176,12 @@ resume_vm() {
                 log "VM start command issued successfully"
                 # VM will resume from hibernation automatically
             else
-                log "ERROR: Failed to start VM"
+                log "ERROR: Failed to start VM (may already be running)"
+                # Check if it's running anyway
+                if vm_is_running; then
+                    log "VM is running, continuing normally"
+                    return 0
+                fi
                 return 1
             fi
             ;;
