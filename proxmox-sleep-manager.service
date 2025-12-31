@@ -10,8 +10,8 @@ RemainAfterExit=yes
 TimeoutStopSec=600
 Environment="PROXMOX_VMID=__VMID__"
 Environment="PROXMOX_VM_NAME=__VM_NAME__"
-ExecStart=/usr/local/bin/proxmox-sleep-manager.sh post-wake
-ExecStop=/usr/local/bin/proxmox-sleep-manager.sh pre-sleep
+ExecStart=/usr/local/bin/proxmox-sleep-manager.sh pre-sleep
+ExecStop=/usr/local/bin/proxmox-sleep-manager.sh post-wake
 
 [Install]
 WantedBy=sleep.target
