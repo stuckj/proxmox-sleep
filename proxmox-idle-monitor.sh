@@ -326,15 +326,10 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         Write-Output "VBS launcher created"
     ' 2>&1
 
-    # Create and start the scheduled task using the VBS wrapper
+    # Create the scheduled task using the VBS wrapper
     qm guest exec "$VMID" -- powershell -Command '
         $helperDir = "$env:ProgramData\proxmox-idle"
         $helperVbs = "$helperDir\idle_helper.vbs"
-
-        # Create scheduled task to run at logon using wscript (completely hidden)
-        # Must run as interactive user to show tray icon
-        $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //NoLogo `"$helperVbs`""
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
 
         # Get the actual logged-in user (not SYSTEM which runs guest agent)
         $loggedInUser = (Get-CimInstance Win32_ComputerSystem).UserName
@@ -343,35 +338,38 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
                 (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").GetOwner().User
             })
         }
-        Write-Output "Configuring task for user: $loggedInUser"
-
-        $principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive -RunLevel Limited
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 9999)
+        Write-Output "User: $loggedInUser"
 
         # Remove old task if exists
         Unregister-ScheduledTask -TaskName "ProxmoxIdleHelper" -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Output "Old task removed"
 
-        # Clear old idle file to ensure fresh test
+        # Clear old idle file
         Remove-Item "$helperDir\idle_seconds.txt" -Force -ErrorAction SilentlyContinue
 
-        # Register new task
+        # Create and register task
+        $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //NoLogo `"$helperVbs`""
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 9999)
         Register-ScheduledTask -TaskName "ProxmoxIdleHelper" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Write-Output "Task registered"
+    ' 2>&1
 
+    # Kill existing helpers and start the task (separate call to avoid timeout)
+    qm guest exec "$VMID" -- powershell -Command '
         # Kill any existing helper processes
-        Get-Process -Name powershell -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
             try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
-                if ($cmdLine -like "*idle_helper*") {
-                    Stop-Process -Id $_.Id -Force
-                }
-            } catch {}
-        }
+                $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
+                $cmd -like "*idle_helper*"
+            } catch { $false }
+        } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-Output "Old processes killed"
 
-        # Start it now for current session using schtasks.exe (works better from SYSTEM context)
-        $result = schtasks /run /tn "ProxmoxIdleHelper" 2>&1
-        Write-Output "Start result: $result"
-
-        Write-Output "Task created and started"
+        # Start it now
+        $out = schtasks /run /tn "ProxmoxIdleHelper" 2>&1
+        Write-Output "schtasks output: $out"
     ' 2>&1
 
     echo "Waiting for helper to initialize..."
