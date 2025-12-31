@@ -334,7 +334,6 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         # Create scheduled task to run at logon using wscript (completely hidden)
         # Must run as interactive user to show tray icon
         $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //NoLogo `"$helperVbs`""
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
 
         # Get the actual logged-in user (not SYSTEM which runs guest agent)
         $loggedInUser = (Get-CimInstance Win32_ComputerSystem).UserName
@@ -351,10 +350,7 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         # Remove old task if exists
         Unregister-ScheduledTask -TaskName "ProxmoxIdleHelper" -Confirm:$false -ErrorAction SilentlyContinue
 
-        # Register new task
-        Register-ScheduledTask -TaskName "ProxmoxIdleHelper" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-
-        # Kill any existing helper processes
+        # Kill any existing helper processes before starting new one
         Get-Process -Name powershell -ErrorAction SilentlyContinue | ForEach-Object {
             try {
                 $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
@@ -365,36 +361,20 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
             } catch {}
         }
 
-        # Small delay to ensure task is fully registered
-        Start-Sleep -Seconds 1
+        # Create triggers: AtLogOn for future logins, plus one-time trigger for immediate start
+        # The one-time trigger fires 5 seconds from now, which Windows will run in user session
+        $triggers = @(
+            (New-ScheduledTaskTrigger -AtLogOn),
+            (New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5))
+        )
 
-        # Start it now for current session (retry a few times)
-        $started = $false
-        for ($i = 0; $i -lt 3; $i++) {
-            try {
-                Start-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction Stop
-                Start-Sleep -Seconds 2
-                $task = Get-ScheduledTask -TaskName "ProxmoxIdleHelper"
-                if ($task.State -eq "Running") {
-                    Write-Output "Task started successfully"
-                    $started = $true
-                    break
-                }
-            } catch {
-                Write-Output "Start attempt $($i+1) failed, retrying..."
-                Start-Sleep -Seconds 1
-            }
-        }
-
-        if (-not $started) {
-            Write-Output "Warning: Task registered but may need manual start or re-login"
-        }
-
-        Write-Output "Task created"
+        # Register task with both triggers
+        Register-ScheduledTask -TaskName "ProxmoxIdleHelper" -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
+        Write-Output "Task registered, will start in 5 seconds..."
     ' 2>&1
 
-    echo "Waiting for helper to initialize..."
-    sleep 5
+    echo "Waiting for helper to start (scheduled trigger)..."
+    sleep 8
 
     # Verify it's working
     local result
