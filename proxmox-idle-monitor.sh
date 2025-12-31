@@ -356,21 +356,8 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         Write-Output "Task registered"
     ' 2>&1
 
-    # Kill existing helpers and start the task (separate call to avoid timeout)
-    qm guest exec "$VMID" -- powershell -Command '
-        # Kill any existing helper processes
-        Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
-            try {
-                $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
-                $cmd -like "*idle_helper*"
-            } catch { $false }
-        } | Stop-Process -Force -ErrorAction SilentlyContinue
-        Write-Output "Old processes killed"
-
-        # Start it now
-        $out = schtasks /run /tn "ProxmoxIdleHelper" 2>&1
-        Write-Output "schtasks output: $out"
-    ' 2>&1
+    # Start the task
+    qm guest exec "$VMID" -- cmd /c 'schtasks /run /tn "ProxmoxIdleHelper"' 2>&1
 
     echo "Waiting for helper to initialize..."
     sleep 5
