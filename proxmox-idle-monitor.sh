@@ -351,6 +351,9 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         # Remove old task if exists
         Unregister-ScheduledTask -TaskName "ProxmoxIdleHelper" -Confirm:$false -ErrorAction SilentlyContinue
 
+        # Clear old idle file to ensure fresh test
+        Remove-Item "$helperDir\idle_seconds.txt" -Force -ErrorAction SilentlyContinue
+
         # Register new task
         Register-ScheduledTask -TaskName "ProxmoxIdleHelper" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
@@ -364,8 +367,9 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
             } catch {}
         }
 
-        # Start it now for current session
-        Start-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction SilentlyContinue
+        # Start it now for current session using schtasks.exe (works better from SYSTEM context)
+        $result = schtasks /run /tn "ProxmoxIdleHelper" 2>&1
+        Write-Output "Start result: $result"
 
         Write-Output "Task created and started"
     ' 2>&1
