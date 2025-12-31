@@ -357,7 +357,7 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
     ' 2>&1
 
     # Start the task
-    qm guest exec "$VMID" -- cmd /c 'schtasks /run /tn "ProxmoxIdleHelper"' 2>&1
+    qm guest exec "$VMID" -- schtasks /run /tn ProxmoxIdleHelper 2>&1
 
     echo "Waiting for helper to initialize..."
     sleep 5
@@ -382,7 +382,7 @@ uninstall_windows_idle_helper() {
     echo "Uninstalling Windows idle helper from VM $VMID..."
 
     # Remove scheduled task using schtasks (faster than PowerShell)
-    qm guest exec "$VMID" -- cmd /c 'schtasks /delete /tn "ProxmoxIdleHelper" /f 2>nul || echo Task not found' 2>&1
+    qm guest exec "$VMID" -- schtasks /delete /tn ProxmoxIdleHelper /f 2>&1
 
     # Kill helper processes using taskkill (can't easily target by cmdline, so kill wscript running our vbs)
     qm guest exec "$VMID" -- cmd /c 'taskkill /f /im wscript.exe 2>nul & echo Processes killed' 2>&1
