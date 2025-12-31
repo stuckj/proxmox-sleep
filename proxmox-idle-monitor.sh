@@ -381,38 +381,14 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
 uninstall_windows_idle_helper() {
     echo "Uninstalling Windows idle helper from VM $VMID..."
 
-    qm guest exec "$VMID" -- powershell -Command '
-        # Stop any running helper processes
-        Get-Process -Name powershell -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-                $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").CommandLine
-                if ($cmdLine -like "*idle_helper*") {
-                    Stop-Process -Id $_.Id -Force
-                    Write-Output "Stopped helper process $($_.Id)"
-                }
-            } catch {}
-        }
+    # Remove scheduled task using schtasks (faster than PowerShell)
+    qm guest exec "$VMID" -- cmd /c 'schtasks /delete /tn "ProxmoxIdleHelper" /f 2>nul || echo Task not found' 2>&1
 
-        # Remove scheduled task
-        $task = Get-ScheduledTask -TaskName "ProxmoxIdleHelper" -ErrorAction SilentlyContinue
-        if ($task) {
-            Unregister-ScheduledTask -TaskName "ProxmoxIdleHelper" -Confirm:$false
-            Write-Output "Removed scheduled task"
-        } else {
-            Write-Output "Scheduled task not found"
-        }
+    # Kill helper processes using taskkill (can't easily target by cmdline, so kill wscript running our vbs)
+    qm guest exec "$VMID" -- cmd /c 'taskkill /f /im wscript.exe 2>nul & echo Processes killed' 2>&1
 
-        # Remove helper files
-        $helperDir = "$env:ProgramData\proxmox-idle"
-        if (Test-Path $helperDir) {
-            Remove-Item -Path $helperDir -Recurse -Force
-            Write-Output "Removed helper files from $helperDir"
-        } else {
-            Write-Output "Helper directory not found"
-        }
-
-        Write-Output "Uninstall complete"
-    ' 2>&1
+    # Remove helper files
+    qm guest exec "$VMID" -- cmd /c 'rmdir /s /q "%ProgramData%\proxmox-idle" 2>nul & echo Files removed' 2>&1
 
     echo "Done."
 }
