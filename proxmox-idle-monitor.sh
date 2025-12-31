@@ -332,9 +332,20 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         $helperVbs = "$helperDir\idle_helper.vbs"
 
         # Create scheduled task to run at logon using wscript (completely hidden)
+        # Must run as interactive user to show tray icon
         $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //NoLogo `"$helperVbs`""
         $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Users" -RunLevel Limited
+
+        # Get the actual logged-in user (not SYSTEM which runs guest agent)
+        $loggedInUser = (Get-CimInstance Win32_ComputerSystem).UserName
+        if (-not $loggedInUser) {
+            $loggedInUser = (Get-Process -Name explorer -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object {
+                (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").GetOwner().User
+            })
+        }
+        Write-Output "Configuring task for user: $loggedInUser"
+
+        $principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 9999)
 
         # Remove old task if exists
