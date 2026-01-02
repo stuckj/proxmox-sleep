@@ -1,0 +1,15 @@
+[Unit]
+Description=Proxmox Idle Monitor - Auto-sleep when system is idle
+After=network.target pve-cluster.service
+
+[Service]
+Type=simple
+Environment="PROXMOX_VMID=__VMID__"
+Environment="PROXMOX_VM_NAME=__VM_NAME__"
+Environment="IDLE_THRESHOLD_MINUTES=__IDLE_MINUTES__"
+ExecStart=/usr/local/bin/proxmox-idle-monitor.sh start
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
