@@ -36,6 +36,16 @@ elif [[ -n "${EXTRA_GAMING_PROCESSES:-}" ]]; then
     GAMING_PROCESSES="$EXTRA_GAMING_PROCESSES"
 fi
 
+# Host blocking processes - prevent sleep when these are running on the Proxmox host
+# Set to empty string in config to disable host process detection
+HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES:-}"
+# Append extra processes if defined
+if [[ -n "${EXTRA_HOST_BLOCKING_PROCESSES:-}" ]] && [[ -n "$HOST_BLOCKING_PROCESSES" ]]; then
+    HOST_BLOCKING_PROCESSES="$HOST_BLOCKING_PROCESSES,$EXTRA_HOST_BLOCKING_PROCESSES"
+elif [[ -n "${EXTRA_HOST_BLOCKING_PROCESSES:-}" ]]; then
+    HOST_BLOCKING_PROCESSES="$EXTRA_HOST_BLOCKING_PROCESSES"
+fi
+
 # Helper to parse JSON output from qm guest exec
 # Extracts the value from "out-data" field
 parse_guest_output() {
@@ -423,6 +433,33 @@ check_gaming_processes() {
     return 1  # No gaming processes found
 }
 
+# Check if any host blocking processes are running on the Proxmox host
+# These prevent sleep when actively running (e.g., unattended-upgrade during updates)
+check_host_blocking_processes() {
+    # Skip if no host blocking processes configured
+    if [[ -z "$HOST_BLOCKING_PROCESSES" ]]; then
+        debug "Host blocking process detection disabled (empty list)"
+        return 1  # No processes to check = not detected
+    fi
+
+    # Convert comma-separated list to array
+    IFS=',' read -ra blocking_procs <<< "$HOST_BLOCKING_PROCESSES"
+
+    for proc in "${blocking_procs[@]}"; do
+        # Trim whitespace
+        proc=$(echo "$proc" | xargs)
+        [[ -z "$proc" ]] && continue
+
+        # Check if process is running using pgrep
+        if pgrep -x "$proc" > /dev/null 2>&1; then
+            debug "Found host blocking process: $proc"
+            return 0  # Blocking process found
+        fi
+    done
+
+    return 1  # No blocking processes found
+}
+
 # Check if any Windows process is requesting the system stay awake
 # This catches media players, downloads, presentations, etc.
 # Filters out known system noise like AMD CPU power management
@@ -616,6 +653,12 @@ is_system_idle() {
         return 1  # Something is keeping Windows awake
     fi
 
+    # Check 8: Host blocking processes (e.g., unattended-upgrade)
+    if check_host_blocking_processes; then
+        debug "Host blocking processes running"
+        return 1  # Host process is blocking sleep
+    fi
+
     debug "System appears idle"
     return 0  # System is idle
 }
@@ -734,6 +777,16 @@ check_once() {
         echo "YES"
     else
         echo "NO"
+    fi
+
+    echo ""
+    echo -n "Host Blocking Processes: "
+    if [[ -z "$HOST_BLOCKING_PROCESSES" ]]; then
+        echo "DISABLED"
+    elif check_host_blocking_processes; then
+        echo "DETECTED"
+    else
+        echo "none"
     fi
 
     echo ""

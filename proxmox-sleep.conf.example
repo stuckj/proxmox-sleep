@@ -45,6 +45,16 @@ GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.ex
 # Use this to add your specific games without modifying the defaults
 EXTRA_GAMING_PROCESSES=""
 
+# Host Blocking Process Detection
+# Comma-separated list of process names on the Proxmox HOST that prevent sleep
+# when actively running. Use this for maintenance tasks like updates.
+# Note: This checks for running PROCESSES, not services - the unattended-upgrade
+# service runs continuously but only spawns the unattended-upgrade process during updates.
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+
+# Additional host processes to check (will be merged with HOST_BLOCKING_PROCESSES)
+EXTRA_HOST_BLOCKING_PROCESSES=""
+
 # Logging
 # Log file locations
 SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
