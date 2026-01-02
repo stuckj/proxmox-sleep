@@ -88,7 +88,9 @@ hibernate_vm() {
     # Send hibernate command to Windows
     # Using shutdown /h which triggers hibernation
     log "Sending hibernate command to Windows..."
-    qm guest exec "$VMID" -- cmd /c "shutdown /h" &>/dev/null
+    if ! qm guest exec "$VMID" -- cmd /c "shutdown /h" &>/dev/null; then
+        log "WARNING: Hibernate command may have failed (exit code: $?)"
+    fi
 
     # Wait for VM to actually stop (hibernation completes)
     # We need to confirm it stays stopped to avoid race conditions
@@ -110,7 +112,7 @@ hibernate_vm() {
 
             if [[ $consecutive_stopped -ge $required_stopped ]]; then
                 # Double-check QEMU process is gone
-                if ! pgrep -f "qemu.*-id $VMID" > /dev/null 2>&1; then
+                if ! pgrep -f "qemu.*-id $VMID " > /dev/null 2>&1; then
                     log "VM hibernation confirmed complete (took ${waited}s)"
                     return 0
                 else
@@ -158,7 +160,8 @@ resume_vm() {
                 while vm_is_running && [[ $wait_count -lt 12 ]]; do
                     sleep 5
                     wait_count=$((wait_count + 1))
-                    log "VM still running, waiting... ($((wait_count * 5))s)"
+                    local elapsed_seconds=$((wait_count * 5))
+                    log "VM still running, waiting... (${elapsed_seconds}s)"
                 done
 
                 if vm_is_running; then
@@ -171,8 +174,9 @@ resume_vm() {
 
             sleep "$WAKE_DELAY"  # Give system time to stabilize
             qm start "$VMID"
+            local start_status=$?
 
-            if [[ $? -eq 0 ]]; then
+            if [[ $start_status -eq 0 ]]; then
                 log "VM start command issued successfully"
                 # VM will resume from hibernation automatically
             else

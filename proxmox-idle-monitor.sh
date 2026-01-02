@@ -50,9 +50,9 @@ fi
 # Extracts the value from "out-data" field
 parse_guest_output() {
     local json="$1"
-    # Remove newlines and extract out-data value
+    # Remove newlines and extract out-data value (using sed for portability)
     # Also remove literal \r\n sequences from the JSON-escaped output
-    echo "$json" | tr -d '\n\r' | grep -oP '"out-data"\s*:\s*"\K[^"]*' | sed 's/\\r\\n//g; s/\\r//g; s/\\n//g'
+    echo "$json" | tr -d '\n\r' | sed -n 's/.*"out-data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\r\\n//g; s/\\r//g; s/\\n//g'
 }
 
 # Logging
@@ -153,10 +153,16 @@ get_gpu_usage() {
 # Get VM CPU usage from Proxmox
 get_vm_cpu_usage() {
     # Use pvesh to get VM status which includes CPU
-    local cpu json
-    json=$(pvesh get /nodes/$(hostname)/qemu/$VMID/status/current --output-format json 2>/dev/null)
-    # Handle multi-line JSON - remove newlines and parse
-    cpu=$(echo "$json" | tr -d '\n\r' | grep -oP '"cpu"\s*:\s*\K[0-9.]+' | head -1)
+    local cpu json node_name
+    node_name=$(hostname 2>/dev/null)
+    if [[ -z "$node_name" ]]; then
+        debug "Failed to get hostname"
+        echo "-1"
+        return
+    fi
+    json=$(pvesh get /nodes/$node_name/qemu/$VMID/status/current --output-format json 2>/dev/null)
+    # Handle multi-line JSON - remove newlines and parse (using sed for portability)
+    cpu=$(echo "$json" | tr -d '\n\r' | sed -n 's/.*"cpu"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)
     if [[ -n "$cpu" ]]; then
         # Convert from 0-1 to percentage
         echo "$cpu" | awk '{printf "%.0f", $1 * 100}'
@@ -330,7 +336,9 @@ try {
         $helperDir = "$env:ProgramData\proxmox-idle"
         $vbs = @"
 Set objShell = CreateObject("WScript.Shell")
-objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & Replace(WScript.ScriptFullName, ".vbs", ".ps1") & """", 0, False
+Set fso = CreateObject("Scripting.FileSystemObject")
+psScript = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), fso.GetBaseName(WScript.ScriptFullName) & ".ps1")
+objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & psScript & """", 0, False
 "@
         $vbs | Set-Content "$helperDir\idle_helper.vbs" -Force
         Write-Output "VBS launcher created"
@@ -342,11 +350,22 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
         $helperVbs = "$helperDir\idle_helper.vbs"
 
         # Get the actual logged-in user (not SYSTEM which runs guest agent)
-        $loggedInUser = (Get-CimInstance Win32_ComputerSystem).UserName
+        $loggedInUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
         if (-not $loggedInUser) {
-            $loggedInUser = (Get-Process -Name explorer -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object {
-                (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)").GetOwner().User
-            })
+            # Fallback: try to infer user from explorer.exe owner
+            $explorer = Get-Process -Name explorer -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($explorer) {
+                $proc = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $explorer.Id) -ErrorAction SilentlyContinue
+                if ($proc) {
+                    $owner = $proc.GetOwner()
+                    if ($owner -and $owner.User) {
+                        $loggedInUser = $owner.User
+                    }
+                }
+            }
+        }
+        if (-not $loggedInUser) {
+            throw "Unable to determine logged-in user for scheduled task registration"
         }
         Write-Output "User: $loggedInUser"
 
@@ -394,8 +413,13 @@ uninstall_windows_idle_helper() {
     # Remove scheduled task using schtasks (faster than PowerShell)
     qm guest exec "$VMID" -- schtasks /delete /tn ProxmoxIdleHelper /f 2>&1
 
-    # Kill helper processes using taskkill (can't easily target by cmdline, so kill wscript running our vbs)
-    qm guest exec "$VMID" -- cmd /c 'taskkill /f /im wscript.exe 2>nul & echo Processes killed' 2>&1
+    # Kill only wscript.exe processes running our idle helper (not all wscript processes)
+    qm guest exec "$VMID" -- powershell -Command '
+        Get-CimInstance Win32_Process -Filter "Name=''wscript.exe''" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like "*idle_helper.vbs*" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Write-Output "Processes killed"
+    ' 2>&1
 
     # Remove helper files
     qm guest exec "$VMID" -- cmd /c 'rmdir /s /q "%ProgramData%\proxmox-idle" 2>nul & echo Files removed' 2>&1
@@ -586,6 +610,19 @@ get_effective_idle_time() {
         return
     fi
 
+    # Validate both values are valid integers before numeric comparison
+    if ! [[ "$win_idle" =~ ^[0-9]+$ ]]; then
+        debug "Invalid Windows idle time value: '$win_idle'"
+        echo "-1"
+        return
+    fi
+
+    if ! [[ "$seconds_since_wake" =~ ^[0-9]+$ ]]; then
+        debug "Invalid seconds since wake value: '$seconds_since_wake'"
+        echo "-1"
+        return
+    fi
+
     # If Windows idle time > time since wake, user hasn't been active since wake
     # So effective idle time is just time since wake
     if [[ $win_idle -gt $seconds_since_wake ]]; then
@@ -611,7 +648,7 @@ is_system_idle() {
     local gpu_usage
     gpu_usage=$(get_gpu_usage)
     debug "GPU usage: $gpu_usage%"
-    if [[ "$gpu_usage" != "-1" ]] && [[ "$gpu_usage" -gt "$GPU_IDLE_THRESHOLD" ]]; then
+    if [[ "$gpu_usage" =~ ^-?[0-9]+$ ]] && [[ "$gpu_usage" != "-1" ]] && [[ "$gpu_usage" -gt "$GPU_IDLE_THRESHOLD" ]]; then
         debug "GPU active ($gpu_usage% > $GPU_IDLE_THRESHOLD%)"
         return 1  # GPU is active
     fi
@@ -620,7 +657,7 @@ is_system_idle() {
     local cpu_usage
     cpu_usage=$(get_vm_cpu_usage)
     debug "VM CPU usage: $cpu_usage%"
-    if [[ "$cpu_usage" != "-1" ]] && [[ "$cpu_usage" -gt "$CPU_IDLE_THRESHOLD" ]]; then
+    if [[ "$cpu_usage" =~ ^[0-9]+$ ]] && [[ "$cpu_usage" != "-1" ]] && [[ "$cpu_usage" -gt "$CPU_IDLE_THRESHOLD" ]]; then
         debug "VM CPU active ($cpu_usage% > $CPU_IDLE_THRESHOLD%)"
         return 1  # CPU is active
     fi
@@ -636,7 +673,7 @@ is_system_idle() {
     effective_idle=$(get_effective_idle_time)
     debug "Effective idle time: ${effective_idle}s"
     local idle_threshold_seconds=$((IDLE_THRESHOLD_MINUTES * 60))
-    if [[ "$effective_idle" != "-1" ]] && [[ "$effective_idle" -lt "$idle_threshold_seconds" ]]; then
+    if [[ "$effective_idle" =~ ^[0-9]+$ ]] && [[ "$effective_idle" != "-1" ]] && [[ "$effective_idle" -lt "$idle_threshold_seconds" ]]; then
         debug "User recently active (${effective_idle}s < ${idle_threshold_seconds}s)"
         return 1  # User recently active
     fi
@@ -676,7 +713,24 @@ record_idle_state() {
 
     local idle_start
     idle_start=$(cat "$STATE_FILE")
-    local idle_duration=$(( (current_time - idle_start) / 60 ))
+
+    # Validate idle_start is a valid non-negative integer
+    if [[ ! "$idle_start" =~ ^[0-9]+$ ]]; then
+        log "Invalid idle start timestamp in $STATE_FILE ('$idle_start'), resetting idle state"
+        echo "$current_time" > "$STATE_FILE"
+        return 1  # Treat as not yet time to sleep
+    fi
+
+    local idle_seconds=$(( current_time - idle_start ))
+
+    # Guard against negative durations due to clock adjustments
+    if (( idle_seconds < 0 )); then
+        log "Negative idle duration detected (clock adjusted?), resetting idle state"
+        echo "$current_time" > "$STATE_FILE"
+        return 1  # Treat as not yet time to sleep
+    fi
+
+    local idle_duration=$(( idle_seconds / 60 ))
 
     log "System has been idle for $idle_duration minutes"
 
@@ -812,7 +866,12 @@ status() {
             current_time=$(date +%s)
             local idle_duration=$(( (current_time - idle_start) / 60 ))
             echo "Idle Tracking: Counting down - ${idle_duration}/${IDLE_THRESHOLD_MINUTES} minutes"
-            echo "Sleep in: $((IDLE_THRESHOLD_MINUTES - idle_duration)) minutes"
+            local remaining=$((IDLE_THRESHOLD_MINUTES - idle_duration))
+            if (( remaining <= 0 )); then
+                echo "Sleep in: imminent"
+            else
+                echo "Sleep in: ${remaining} minutes"
+            fi
         else
             echo "Idle Tracking: Will start on next check"
         fi

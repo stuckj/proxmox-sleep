@@ -70,16 +70,25 @@ echo -e "${GREEN}✓ Scripts installed to $INSTALL_DIR${NC}"
 # Install systemd services with configured values
 echo "Installing systemd services..."
 
+# Escape special characters for sed replacement (& \ /)
+escape_sed() {
+    printf '%s' "$1" | sed 's/[&/\]/\\&/g'
+}
+
+ESCAPED_VMID=$(escape_sed "$VMID")
+ESCAPED_VM_NAME=$(escape_sed "$VM_NAME")
+ESCAPED_IDLE_MINUTES=$(escape_sed "$IDLE_MINUTES")
+
 # Copy and configure sleep manager service
 cp "$SCRIPT_DIR/proxmox-sleep-manager.service" "$SYSTEMD_DIR/"
-sed -i "s/__VMID__/$VMID/g" "$SYSTEMD_DIR/proxmox-sleep-manager.service"
-sed -i "s/__VM_NAME__/$VM_NAME/g" "$SYSTEMD_DIR/proxmox-sleep-manager.service"
+sed -i "s/__VMID__/$ESCAPED_VMID/g" "$SYSTEMD_DIR/proxmox-sleep-manager.service"
+sed -i "s/__VM_NAME__/$ESCAPED_VM_NAME/g" "$SYSTEMD_DIR/proxmox-sleep-manager.service"
 
 # Copy and configure idle monitor service
 cp "$SCRIPT_DIR/proxmox-idle-monitor.service" "$SYSTEMD_DIR/"
-sed -i "s/__VMID__/$VMID/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
-sed -i "s/__VM_NAME__/$VM_NAME/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
-sed -i "s/__IDLE_MINUTES__/$IDLE_MINUTES/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
+sed -i "s/__VMID__/$ESCAPED_VMID/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
+sed -i "s/__VM_NAME__/$ESCAPED_VM_NAME/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
+sed -i "s/__IDLE_MINUTES__/$ESCAPED_IDLE_MINUTES/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
 
 echo -e "${GREEN}✓ Systemd services installed${NC}"
 
@@ -114,10 +123,10 @@ echo -e "${GREEN}✓ Logrotate config installed${NC}"
 # Install config example if config doesn't exist
 if [[ ! -f /etc/proxmox-sleep.conf ]]; then
     cp "$SCRIPT_DIR/proxmox-sleep.conf.example" /etc/proxmox-sleep.conf
-    # Update config with actual values
-    sed -i "s/^VMID=.*/VMID=$VMID/" /etc/proxmox-sleep.conf
-    sed -i "s/^VM_NAME=.*/VM_NAME=\"$VM_NAME\"/" /etc/proxmox-sleep.conf
-    sed -i "s/^IDLE_THRESHOLD_MINUTES=.*/IDLE_THRESHOLD_MINUTES=$IDLE_MINUTES/" /etc/proxmox-sleep.conf
+    # Update config with actual values (using escaped versions for sed safety)
+    sed -i "s/^VMID=.*/VMID=$ESCAPED_VMID/" /etc/proxmox-sleep.conf
+    sed -i "s/^VM_NAME=.*/VM_NAME=\"$ESCAPED_VM_NAME\"/" /etc/proxmox-sleep.conf
+    sed -i "s/^IDLE_THRESHOLD_MINUTES=.*/IDLE_THRESHOLD_MINUTES=$ESCAPED_IDLE_MINUTES/" /etc/proxmox-sleep.conf
     echo -e "${GREEN}✓ Config file created at /etc/proxmox-sleep.conf${NC}"
 else
     echo -e "${YELLOW}⚠ Config file already exists, not overwriting${NC}"
