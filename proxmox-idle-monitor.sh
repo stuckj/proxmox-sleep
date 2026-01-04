@@ -42,6 +42,32 @@ parse_guest_output() {
     echo "$json" | tr -d '\n\r' | sed -n 's/.*"out-data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\r\\n//g; s/\\r//g; s/\\n//g'
 }
 
+# Numeric validation helpers
+# Check if value is a valid non-negative integer
+is_positive_int() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+# Check if value is a valid integer (including negative)
+is_integer() {
+    [[ "$1" =~ ^-?[0-9]+$ ]]
+}
+
+# Check if value is a valid metric (integer and not -1, our error sentinel)
+is_valid_metric() {
+    is_integer "$1" && [[ "$1" != "-1" ]]
+}
+
+# Extract first integer from a string (handles negative numbers)
+extract_int() {
+    echo "$1" | grep -oE '^-?[0-9]+' | head -1
+}
+
+# Extract first positive integer from a string
+extract_positive_int() {
+    echo "$1" | grep -oE '^[0-9]+' | head -1
+}
+
 # Logging
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
@@ -66,8 +92,7 @@ get_nvidia_gpu_usage() {
     local result output
     result=$(qm guest exec "$VMID" -- cmd /c "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits" 2>/dev/null)
     output=$(parse_guest_output "$result")
-    # Extract just the number
-    echo "$output" | grep -oE '^[0-9]+' | head -1
+    extract_positive_int "$output"
 }
 
 # Get AMD GPU usage via Windows performance counters
@@ -88,7 +113,7 @@ get_amd_gpu_usage() {
         }
     " 2>/dev/null)
     output=$(parse_guest_output "$result")
-    echo "$output" | grep -oE '^-?[0-9]+' | head -1
+    extract_int "$output"
 }
 
 # Get Windows performance counter GPU usage (generic fallback)
@@ -101,7 +126,7 @@ get_perfcounter_gpu_usage() {
         } catch { -1 }
     " 2>/dev/null)
     output=$(parse_guest_output "$result")
-    echo "$output" | grep -oE '^-?[0-9]+' | head -1
+    extract_int "$output"
 }
 
 # Get GPU utilization from inside Windows VM via guest agent
@@ -161,10 +186,9 @@ get_vm_cpu_usage() {
 # Check if there are active SSH sessions to the host
 has_active_ssh_sessions() {
     local sessions
-    # Use head -1 to ensure single line, and default to 0 if empty
     sessions=$(who | grep -c pts 2>/dev/null | head -1)
     sessions="${sessions:-0}"
-    [[ "$sessions" =~ ^[0-9]+$ ]] && [[ "$sessions" -gt 0 ]]
+    is_positive_int "$sessions" && [[ "$sessions" -gt 0 ]]
 }
 
 # Check Windows idle time via guest agent
@@ -191,10 +215,10 @@ get_windows_idle_time() {
     ' 2>/dev/null)
 
     output=$(parse_guest_output "$result")
-    idle_seconds=$(echo "$output" | grep -oE '^-?[0-9]+' | head -1)
+    idle_seconds=$(extract_int "$output")
 
     # If we got a valid value from the helper, use it
-    if [[ -n "$idle_seconds" ]] && [[ "$idle_seconds" != "-1" ]]; then
+    if is_valid_metric "$idle_seconds"; then
         echo "$idle_seconds"
         return
     fi
@@ -229,7 +253,7 @@ public class ScreenStatus {
     ' 2>/dev/null)
 
     output=$(parse_guest_output "$result")
-    idle_seconds=$(echo "$output" | grep -oE '^-?[0-9]+' | head -1)
+    idle_seconds=$(extract_int "$output")
     echo "${idle_seconds:--1}"
 }
 
@@ -598,13 +622,13 @@ get_effective_idle_time() {
     fi
 
     # Validate both values are valid integers before numeric comparison
-    if ! [[ "$win_idle" =~ ^[0-9]+$ ]]; then
+    if ! is_positive_int "$win_idle"; then
         debug "Invalid Windows idle time value: '$win_idle'"
         echo "-1"
         return
     fi
 
-    if ! [[ "$seconds_since_wake" =~ ^[0-9]+$ ]]; then
+    if ! is_positive_int "$seconds_since_wake"; then
         debug "Invalid seconds since wake value: '$seconds_since_wake'"
         echo "-1"
         return
@@ -635,7 +659,7 @@ is_system_idle() {
     local gpu_usage
     gpu_usage=$(get_gpu_usage)
     debug "GPU usage: $gpu_usage%"
-    if [[ "$gpu_usage" =~ ^-?[0-9]+$ ]] && [[ "$gpu_usage" != "-1" ]] && [[ "$gpu_usage" -gt "$GPU_IDLE_THRESHOLD" ]]; then
+    if is_valid_metric "$gpu_usage" && [[ "$gpu_usage" -gt "$GPU_IDLE_THRESHOLD" ]]; then
         debug "GPU active ($gpu_usage% > $GPU_IDLE_THRESHOLD%)"
         return 1  # GPU is active
     fi
@@ -644,7 +668,7 @@ is_system_idle() {
     local cpu_usage
     cpu_usage=$(get_vm_cpu_usage)
     debug "VM CPU usage: $cpu_usage%"
-    if [[ "$cpu_usage" =~ ^[0-9]+$ ]] && [[ "$cpu_usage" != "-1" ]] && [[ "$cpu_usage" -gt "$CPU_IDLE_THRESHOLD" ]]; then
+    if is_valid_metric "$cpu_usage" && [[ "$cpu_usage" -gt "$CPU_IDLE_THRESHOLD" ]]; then
         debug "VM CPU active ($cpu_usage% > $CPU_IDLE_THRESHOLD%)"
         return 1  # CPU is active
     fi
@@ -660,7 +684,7 @@ is_system_idle() {
     effective_idle=$(get_effective_idle_time)
     debug "Effective idle time: ${effective_idle}s"
     local idle_threshold_seconds=$((IDLE_THRESHOLD_MINUTES * 60))
-    if [[ "$effective_idle" =~ ^[0-9]+$ ]] && [[ "$effective_idle" != "-1" ]] && [[ "$effective_idle" -lt "$idle_threshold_seconds" ]]; then
+    if is_valid_metric "$effective_idle" && [[ "$effective_idle" -lt "$idle_threshold_seconds" ]]; then
         debug "User recently active (${effective_idle}s < ${idle_threshold_seconds}s)"
         return 1  # User recently active
     fi
@@ -702,7 +726,7 @@ record_idle_state() {
     idle_start=$(cat "$STATE_FILE")
 
     # Validate idle_start is a valid non-negative integer
-    if [[ ! "$idle_start" =~ ^[0-9]+$ ]]; then
+    if ! is_positive_int "$idle_start"; then
         log "Invalid idle start timestamp in $STATE_FILE ('$idle_start'), resetting idle state"
         echo "$current_time" > "$STATE_FILE"
         return 1  # Treat as not yet time to sleep
@@ -724,7 +748,7 @@ record_idle_state() {
     if [[ -f "$WAKE_TIME_FILE" ]]; then
         local wake_time
         wake_time=$(cat "$WAKE_TIME_FILE")
-        if [[ "$wake_time" =~ ^[0-9]+$ ]] && [[ "$idle_start" -lt "$wake_time" ]]; then
+        if is_positive_int "$wake_time" && [[ "$idle_start" -lt "$wake_time" ]]; then
             log "Stale idle state detected (idle tracking started before last wake), resetting"
             echo "$current_time" > "$STATE_FILE"
             return 1  # Treat as not yet time to sleep
@@ -754,7 +778,7 @@ trigger_sleep() {
     local seconds_since_wake
     seconds_since_wake=$(get_seconds_since_wake)
 
-    if [[ "$seconds_since_wake" =~ ^[0-9]+$ ]] && [[ "$seconds_since_wake" -lt "$WAKE_GRACE_PERIOD" ]]; then
+    if is_positive_int "$seconds_since_wake" && [[ "$seconds_since_wake" -lt "$WAKE_GRACE_PERIOD" ]]; then
         log "Within wake grace period (${seconds_since_wake}s < ${WAKE_GRACE_PERIOD}s), skipping sleep"
         reset_idle_state
         return 1
