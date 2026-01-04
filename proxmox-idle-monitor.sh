@@ -19,6 +19,8 @@ GPU_IDLE_THRESHOLD="${GPU_IDLE_THRESHOLD:-10}"
 CPU_IDLE_THRESHOLD="${CPU_IDLE_THRESHOLD:-15}"
 GPU_VENDOR="${GPU_VENDOR:-auto}"
 CHECK_SSH_SESSIONS="${CHECK_SSH_SESSIONS:-1}"
+# Grace period after wake - don't trigger sleep for this many seconds after waking
+WAKE_GRACE_PERIOD="${WAKE_GRACE_PERIOD:-60}"
 LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 STATE_FILE="/tmp/proxmox-idle-monitor.state"
 WAKE_TIME_FILE="/tmp/proxmox-idle-monitor.wake"
@@ -732,6 +734,18 @@ record_idle_state() {
 
     local idle_duration=$(( idle_seconds / 60 ))
 
+    # Sanity check: If idle tracking started before the last wake, the state is stale
+    # This catches cases where the state file persisted across sleep/wake cycles
+    if [[ -f "$WAKE_TIME_FILE" ]]; then
+        local wake_time
+        wake_time=$(cat "$WAKE_TIME_FILE")
+        if [[ "$wake_time" =~ ^[0-9]+$ ]] && [[ "$idle_start" -lt "$wake_time" ]]; then
+            log "Stale idle state detected (idle tracking started before last wake), resetting"
+            echo "$current_time" > "$STATE_FILE"
+            return 1  # Treat as not yet time to sleep
+        fi
+    fi
+
     log "System has been idle for $idle_duration minutes"
 
     if [[ $idle_duration -ge $IDLE_THRESHOLD_MINUTES ]]; then
@@ -750,6 +764,17 @@ reset_idle_state() {
 
 # Trigger system sleep
 trigger_sleep() {
+    # Safety check: Don't trigger sleep if we just woke up
+    # This prevents race conditions where stale state causes immediate re-sleep
+    local seconds_since_wake
+    seconds_since_wake=$(get_seconds_since_wake)
+
+    if [[ "$seconds_since_wake" =~ ^[0-9]+$ ]] && [[ "$seconds_since_wake" -lt "$WAKE_GRACE_PERIOD" ]]; then
+        log "Within wake grace period (${seconds_since_wake}s < ${WAKE_GRACE_PERIOD}s), skipping sleep"
+        reset_idle_state
+        return 1
+    fi
+
     log "Triggering system sleep..."
     reset_idle_state
 

@@ -36,6 +36,11 @@ HIBERNATE_TIMEOUT=300
 # Seconds to wait after host wake before starting VM
 WAKE_DELAY=5
 
+# Grace period after wake (seconds) - prevent immediate re-sleep after waking
+# This is a safety net to ensure the system has time to stabilize before
+# the idle monitor can trigger another sleep cycle
+WAKE_GRACE_PERIOD=60
+
 # Gaming Process Detection
 # Comma-separated list of process names that indicate gaming activity
 # The system won't auto-sleep if any of these are running

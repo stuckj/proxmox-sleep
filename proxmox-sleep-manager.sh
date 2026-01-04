@@ -212,6 +212,22 @@ pre_sleep() {
 # Post-wake hook (called after system wakes)
 post_wake() {
     log "=== POST-WAKE HOOK TRIGGERED ==="
+
+    # CRITICAL: Reset idle monitor state FIRST to prevent immediate re-sleep
+    # The idle monitor may have stale state from before sleep that would
+    # cause it to immediately trigger another sleep cycle
+    local idle_state_file="/tmp/proxmox-idle-monitor.state"
+    local idle_wake_file="/tmp/proxmox-idle-monitor.wake"
+
+    if [[ -f "$idle_state_file" ]]; then
+        log "Clearing stale idle monitor state"
+        rm -f "$idle_state_file"
+    fi
+
+    # Record wake time for idle monitor's grace period
+    date +%s > "$idle_wake_file"
+    log "Wake time recorded for idle monitor"
+
     resume_vm
     local result=$?
     log "=== POST-WAKE HOOK COMPLETE (exit: $result) ==="
