@@ -27,6 +27,16 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Check for existing config file
+EXISTING_CONFIG=0
+if [[ -f /etc/proxmox-sleep.conf ]]; then
+    EXISTING_CONFIG=1
+    echo -e "${YELLOW}Note: Existing config file found at /etc/proxmox-sleep.conf${NC}"
+    echo -e "${YELLOW}The values you enter below are service defaults only.${NC}"
+    echo -e "${YELLOW}Your config file settings will take precedence at runtime.${NC}"
+    echo ""
+fi
+
 # Get VM ID
 read -p "Enter your Windows VM ID [100]: " vmid
 VMID=${vmid:-100}
@@ -129,7 +139,9 @@ if [[ ! -f /etc/proxmox-sleep.conf ]]; then
     sed -i "s/^IDLE_THRESHOLD_MINUTES=.*/IDLE_THRESHOLD_MINUTES=$ESCAPED_IDLE_MINUTES/" /etc/proxmox-sleep.conf
     echo -e "${GREEN}✓ Config file created at /etc/proxmox-sleep.conf${NC}"
 else
-    echo -e "${YELLOW}⚠ Config file already exists, not overwriting${NC}"
+    echo -e "${YELLOW}⚠ Config file already exists at /etc/proxmox-sleep.conf${NC}"
+    echo -e "${YELLOW}  Your existing config file settings will be used (not the values entered above).${NC}"
+    echo -e "${YELLOW}  Edit /etc/proxmox-sleep.conf to change settings.${NC}"
 fi
 
 echo ""
