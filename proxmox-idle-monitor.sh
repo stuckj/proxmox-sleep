@@ -584,10 +584,10 @@ get_power_requests_detail() {
     echo "${output:-None}"
 }
 
-# Get seconds since last wake (or very large number if no wake recorded)
+# Get seconds since last wake (or -1 if no wake recorded)
 get_seconds_since_wake() {
     if [[ ! -f "$WAKE_TIME_FILE" ]]; then
-        echo "999999999"  # No wake recorded, return large number
+        echo "-1"
         return
     fi
 
@@ -621,16 +621,23 @@ get_effective_idle_time() {
         return
     fi
 
-    # Validate both values are valid integers before numeric comparison
+    # Validate Windows idle is a valid integer
     if ! is_positive_int "$win_idle"; then
         debug "Invalid Windows idle time value: '$win_idle'"
         echo "-1"
         return
     fi
 
+    # If no wake time recorded (-1), just use Windows idle time directly
+    if [[ "$seconds_since_wake" == "-1" ]]; then
+        echo "$win_idle"
+        return
+    fi
+
+    # Validate seconds_since_wake is a valid integer
     if ! is_positive_int "$seconds_since_wake"; then
         debug "Invalid seconds since wake value: '$seconds_since_wake'"
-        echo "-1"
+        echo "$win_idle"  # Fall back to Windows idle time
         return
     fi
 
@@ -778,7 +785,8 @@ trigger_sleep() {
     local seconds_since_wake
     seconds_since_wake=$(get_seconds_since_wake)
 
-    if is_positive_int "$seconds_since_wake" && [[ "$seconds_since_wake" -lt "$WAKE_GRACE_PERIOD" ]]; then
+    # Only apply grace period if we have a valid wake time (-1 means no wake recorded)
+    if [[ "$seconds_since_wake" != "-1" ]] && is_positive_int "$seconds_since_wake" && [[ "$seconds_since_wake" -lt "$WAKE_GRACE_PERIOD" ]]; then
         log "Within wake grace period (${seconds_since_wake}s < ${WAKE_GRACE_PERIOD}s), skipping sleep"
         reset_idle_state
         return 1
