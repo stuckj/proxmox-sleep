@@ -141,13 +141,3 @@ If you've tried everything and sleep still causes:
 - GPU hangs requiring power cycle
 
 Then the hibernation approach in this project is your best bet. It's more reliable and, while VM resume takes ~30-60 seconds from hibernation, it's still much faster than a full Windows boot and preserves your session.
-
-## Success Stories
-
-Some configurations that reportedly work:
-- AMD GPUs (especially with vendor-reset kernel module)
-- Older NVIDIA GPUs (pre-RTX in some cases)
-- Intel Arc GPUs
-- Systems with proper IOMMU grouping
-
-The RTX 3060 is hit-or-miss. Your best bet is the hibernation approach, but the above steps are worth trying first.
