@@ -166,29 +166,38 @@ All settings can be configured in `/etc/proxmox-sleep.conf`:
 
 ```bash
 # VM Configuration
-VMID=100                          # Your VM ID
-VM_NAME="windows"                 # VM name for logging
+VMID=100                          # Your Windows VM ID
+VM_NAME="windows"                 # VM name (for logging only)
 
 # Idle Monitor Settings
-IDLE_THRESHOLD_MINUTES=15         # Minutes before auto-sleep
-CHECK_INTERVAL=60                 # Check interval in seconds
-CPU_IDLE_THRESHOLD=15             # CPU usage % threshold
-GPU_IDLE_THRESHOLD=10             # GPU usage % threshold
+IDLE_THRESHOLD_MINUTES=15         # Minutes of idle before auto-sleep (0 to disable)
+CHECK_INTERVAL=60                 # How often to check idle status (seconds)
+CPU_IDLE_THRESHOLD=15             # VM CPU % above this = active
+GPU_IDLE_THRESHOLD=10             # GPU % above this = active
 GPU_VENDOR=auto                   # nvidia, amd, or auto
+CHECK_SSH_SESSIONS=1              # Prevent sleep if SSH sessions active (1=on, 0=off)
 
 # Hibernation Settings
-HIBERNATE_TIMEOUT=300             # Max wait for hibernation
-WAKE_DELAY=5                      # Delay after wake before starting VM
+HIBERNATE_TIMEOUT=300             # Max seconds to wait for Windows hibernation
+WAKE_DELAY=5                      # Seconds to wait after wake before starting VM
+WAKE_GRACE_PERIOD=60              # Seconds after wake before allowing sleep again
 
-# Gaming Process Detection
-GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,..."
+# Gaming Process Detection (in Windows VM)
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,..."
 EXTRA_GAMING_PROCESSES=""         # Add your own without modifying defaults
 
+# Host Blocking Processes (on Proxmox host)
+# Sleep is prevented when these processes are running on the host
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+EXTRA_HOST_BLOCKING_PROCESSES=""  # Add your own without modifying defaults
+
 # Logging
+SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
+IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
 DEBUG=0                           # Set to 1 for verbose logging
 ```
 
-See `proxmox-sleep.conf.example` for all available options.
+See `proxmox-sleep.conf.example` for the complete reference.
 
 Environment variables override config file settings, which override defaults.
 
@@ -204,6 +213,7 @@ The idle monitor checks multiple signals:
 | Windows Power Requests | Guest Agent (powercfg) | Media players, downloads, etc. |
 | Gaming Processes | Guest Agent (Get-Process) | Configurable process list |
 | SSH Sessions | Host `who` command | Optional, can disable |
+| Host Blocking Processes | Host `pgrep` | e.g., unattended-upgrade |
 
 All must indicate "idle" for the configured duration before triggering sleep.
 
