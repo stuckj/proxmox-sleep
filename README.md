@@ -183,13 +183,13 @@ WAKE_DELAY=5                      # Seconds to wait after wake before starting V
 WAKE_GRACE_PERIOD=60              # Seconds after wake before allowing sleep again
 
 # Gaming Process Detection (in Windows VM)
+# Set to "" to disable
 GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,..."
-EXTRA_GAMING_PROCESSES=""         # Add your own without modifying defaults
 
 # Host Blocking Processes (on Proxmox host)
 # Sleep is prevented when these processes are running on the host
+# Set to "" to disable
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
-EXTRA_HOST_BLOCKING_PROCESSES=""  # Add your own without modifying defaults
 
 # Logging
 SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
@@ -250,11 +250,11 @@ These don't indicate real user activity and are ignored.
 Edit `/etc/proxmox-sleep.conf`:
 
 ```bash
-# Add to the existing list
-GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe"
+# Customize the process list (include any launchers or games you want detected)
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Cyberpunk2077.exe,eldenring.exe"
 
-# Or add extras without modifying defaults
-EXTRA_GAMING_PROCESSES="Cyberpunk2077.exe,eldenring.exe,Palworld-Win64-Shipping.exe"
+# Or disable gaming process detection entirely
+GAMING_PROCESSES=""
 ```
 
 ## Trying Native Sleep Instead

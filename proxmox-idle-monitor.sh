@@ -25,28 +25,13 @@ LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 STATE_FILE="/tmp/proxmox-idle-monitor.state"
 WAKE_TIME_FILE="/tmp/proxmox-idle-monitor.wake"
 
-# Gaming processes (from config or defaults)
+# Gaming processes - prevent sleep when these are running in Windows VM
 # Set to empty string in config to disable gaming process detection
-if [[ -z "${GAMING_PROCESSES+x}" ]]; then
-    # GAMING_PROCESSES not set at all, use defaults
-    GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
-fi
-# Append extra processes if defined and GAMING_PROCESSES is not empty
-if [[ -n "${EXTRA_GAMING_PROCESSES:-}" ]] && [[ -n "$GAMING_PROCESSES" ]]; then
-    GAMING_PROCESSES="$GAMING_PROCESSES,$EXTRA_GAMING_PROCESSES"
-elif [[ -n "${EXTRA_GAMING_PROCESSES:-}" ]]; then
-    GAMING_PROCESSES="$EXTRA_GAMING_PROCESSES"
-fi
+GAMING_PROCESSES="${GAMING_PROCESSES:-steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe}"
 
 # Host blocking processes - prevent sleep when these are running on the Proxmox host
 # Set to empty string in config to disable host process detection
 HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES:-}"
-# Append extra processes if defined
-if [[ -n "${EXTRA_HOST_BLOCKING_PROCESSES:-}" ]] && [[ -n "$HOST_BLOCKING_PROCESSES" ]]; then
-    HOST_BLOCKING_PROCESSES="$HOST_BLOCKING_PROCESSES,$EXTRA_HOST_BLOCKING_PROCESSES"
-elif [[ -n "${EXTRA_HOST_BLOCKING_PROCESSES:-}" ]]; then
-    HOST_BLOCKING_PROCESSES="$EXTRA_HOST_BLOCKING_PROCESSES"
-fi
 
 # Helper to parse JSON output from qm guest exec
 # Extracts the value from "out-data" field
