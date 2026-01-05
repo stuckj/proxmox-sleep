@@ -3,7 +3,7 @@
 # Uninstall script for Proxmox Sleep Manager
 #
 
-set -e
+set -euo pipefail
 
 INSTALL_DIR="/usr/local/bin"
 SYSTEMD_DIR="/etc/systemd/system"

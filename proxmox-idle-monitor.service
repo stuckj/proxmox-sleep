@@ -4,6 +4,7 @@ After=network.target pve-cluster.service
 
 [Service]
 Type=simple
+SyslogIdentifier=proxmox-idle-monitor
 Environment="PROXMOX_VMID=__VMID__"
 Environment="PROXMOX_VM_NAME=__VM_NAME__"
 Environment="IDLE_THRESHOLD_MINUTES=__IDLE_MINUTES__"
