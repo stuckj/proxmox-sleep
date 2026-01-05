@@ -17,8 +17,7 @@ priority: optional
 section: admin
 
 # Package dependencies
-depends:
-  - qemu-guest-agent
+# Note: qemu-guest-agent must be installed in the Windows VM, not on the Proxmox host
 recommends:
   - logrotate
 

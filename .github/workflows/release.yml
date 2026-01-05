@@ -147,6 +147,7 @@ jobs:
           echo "Architectures: all" >> Release
           echo "Components: main" >> Release
           echo "Description: Proxmox Sleep Manager packages" >> Release
+          echo "Date: $(date -Ru)" >> Release
 
           # Add checksums to Release file
           echo "SHA256:" >> Release
