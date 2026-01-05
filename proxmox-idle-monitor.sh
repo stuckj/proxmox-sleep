@@ -68,6 +68,48 @@ extract_positive_int() {
     echo "$1" | grep -oE '^[0-9]+' | head -1
 }
 
+# Exit codes (from sysexits.h)
+EX_OK=0
+EX_CONFIG=78  # Configuration error
+
+# Validate configuration before starting
+# Returns 0 if valid, exits with EX_CONFIG if invalid
+validate_config() {
+    local errors=0
+
+    # Check if config file exists
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "ERROR: Configuration file not found: $CONFIG_FILE" >&2
+        echo "       Copy the example config and edit it:" >&2
+        echo "       cp /usr/share/doc/proxmox-sleep/examples/proxmox-sleep.conf.example /etc/proxmox-sleep.conf" >&2
+        exit $EX_CONFIG
+    fi
+
+    # Check if VMID is set and VM exists
+    if [[ -z "$VMID" ]]; then
+        echo "ERROR: VMID is not set in $CONFIG_FILE" >&2
+        errors=$((errors + 1))
+    elif ! qm status "$VMID" &>/dev/null; then
+        echo "ERROR: VM $VMID does not exist" >&2
+        echo "       Edit $CONFIG_FILE and set the correct VMID" >&2
+        errors=$((errors + 1))
+    fi
+
+    # Check idle threshold is a positive number
+    if ! is_positive_int "$IDLE_THRESHOLD_MINUTES" || [[ "$IDLE_THRESHOLD_MINUTES" -eq 0 ]]; then
+        echo "ERROR: IDLE_THRESHOLD_MINUTES must be a positive number (current: '$IDLE_THRESHOLD_MINUTES')" >&2
+        errors=$((errors + 1))
+    fi
+
+    if [[ $errors -gt 0 ]]; then
+        echo "" >&2
+        echo "Configuration errors found. Edit $CONFIG_FILE to fix them." >&2
+        exit $EX_CONFIG
+    fi
+
+    return 0
+}
+
 # Logging
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
@@ -928,6 +970,7 @@ status() {
 # Main
 case "${1:-}" in
     start|monitor)
+        validate_config
         monitor_loop
         ;;
     check)

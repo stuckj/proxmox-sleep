@@ -52,24 +52,62 @@ powercfg /hibernate on
 
 ## Installation
 
-### Step 1: Install on Proxmox Host
+### Option 1: Install from Repository (Recommended)
+
+**Debian/Ubuntu/Proxmox (APT):**
 
 ```bash
-# Clone or copy files to your Proxmox host
+# Add the GPG key
+curl -fsSL https://stuckj.github.io/proxmox-sleep/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/proxmox-sleep.gpg
+
+# Add the repository
+echo "deb [signed-by=/usr/share/keyrings/proxmox-sleep.gpg] https://stuckj.github.io/proxmox-sleep/apt stable main" | sudo tee /etc/apt/sources.list.d/proxmox-sleep.list
+
+# Install
+sudo apt update
+sudo apt install proxmox-sleep
+```
+
+**RHEL/CentOS/Fedora (YUM/DNF):**
+
+```bash
+# Add the repository
+sudo tee /etc/yum.repos.d/proxmox-sleep.repo << 'EOF'
+[proxmox-sleep]
+name=Proxmox Sleep Manager
+baseurl=https://stuckj.github.io/proxmox-sleep/yum
+enabled=1
+gpgcheck=1
+gpgkey=https://stuckj.github.io/proxmox-sleep/yum/gpg-key.asc
+EOF
+
+# Install
+sudo dnf install proxmox-sleep
+```
+
+After installation, configure the package:
+
+```bash
+# Copy the example config
+cp /usr/share/doc/proxmox-sleep/examples/proxmox-sleep.conf.example /etc/proxmox-sleep.conf
+
+# Edit the config and set your VM ID
+nano /etc/proxmox-sleep.conf
+
+# Enable the idle monitor (sleep manager is already enabled)
+systemctl enable --now proxmox-idle-monitor
+```
+
+### Option 2: Install from Source
+
+```bash
+# Clone the repository
 git clone https://github.com/stuckj/proxmox-sleep.git
 cd proxmox-sleep
 
-# Run installer (as root)
-chmod +x install.sh
+# Run the installer (as root)
 ./install.sh
 ```
-
-The installer will:
-- Ask for your VM ID and idle threshold
-- Install scripts to `/usr/local/bin`
-- Create config file at `/etc/proxmox-sleep.conf`
-- Configure and enable systemd services
-- Optionally enable auto-sleep monitoring
 
 ### Step 2: Install Windows Idle Helper (Required)
 
@@ -89,28 +127,6 @@ This installs a Windows scheduled task that:
 - Can be exited by right-clicking the tray icon
 
 The tray icon appears as an "i" (information) icon and shows "Idle: Xm Ys" when you hover over it.
-
-## Manual Installation
-
-```bash
-# Copy scripts
-cp proxmox-sleep-manager.sh /usr/local/bin/
-cp proxmox-idle-monitor.sh /usr/local/bin/
-chmod +x /usr/local/bin/proxmox-*.sh
-
-# Create and edit config file
-cp proxmox-sleep.conf.example /etc/proxmox-sleep.conf
-nano /etc/proxmox-sleep.conf  # Edit VMID and other settings
-
-# Copy and edit service files (replace __VMID__, __VM_NAME__, __IDLE_MINUTES__)
-cp proxmox-sleep-manager.service /etc/systemd/system/
-cp proxmox-idle-monitor.service /etc/systemd/system/
-
-# Enable services
-systemctl daemon-reload
-systemctl enable proxmox-sleep-manager.service
-systemctl enable --now proxmox-idle-monitor.service
-```
 
 ## Usage
 
@@ -310,23 +326,28 @@ grep GPU_VENDOR /etc/proxmox-sleep.conf
 
 ## Uninstalling
 
+### If installed from repository or package:
+
 ```bash
-# Run the uninstall script
-chmod +x uninstall.sh
+# Debian/Ubuntu/Proxmox:
+sudo apt remove proxmox-sleep
+# Optionally remove the repository:
+sudo rm /etc/apt/sources.list.d/proxmox-sleep.list
+sudo rm /usr/share/keyrings/proxmox-sleep.gpg
+
+# RHEL/CentOS/Fedora:
+sudo dnf remove proxmox-sleep
+# Optionally remove the repository:
+sudo rm /etc/yum.repos.d/proxmox-sleep.repo
+```
+
+### If installed from source:
+
+```bash
 ./uninstall.sh
 ```
 
-Or manually:
-```bash
-systemctl disable --now proxmox-sleep-manager.service
-systemctl disable --now proxmox-idle-monitor.service
-rm /etc/systemd/system/proxmox-sleep-manager.service
-rm /etc/systemd/system/proxmox-idle-monitor.service
-rm /usr/local/bin/proxmox-sleep-manager.sh
-rm /usr/local/bin/proxmox-idle-monitor.sh
-rm /etc/proxmox-sleep.conf  # Optional: keep for reinstall
-systemctl daemon-reload
-```
+The config file (`/etc/proxmox-sleep.conf`) and log files are preserved after uninstall.
 
 ## Contributing
 

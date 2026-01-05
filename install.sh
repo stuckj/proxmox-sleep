@@ -7,7 +7,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/usr/local/bin"
-SYSTEMD_DIR="/etc/systemd/system"
+SYSTEMD_DIR="/lib/systemd/system"
+DOC_DIR="/usr/share/doc/proxmox-sleep"
 
 # Colors
 RED='\033[0;31m'
@@ -32,8 +33,6 @@ EXISTING_CONFIG=0
 if [[ -f /etc/proxmox-sleep.conf ]]; then
     EXISTING_CONFIG=1
     echo -e "${YELLOW}Note: Existing config file found at /etc/proxmox-sleep.conf${NC}"
-    echo -e "${YELLOW}The values you enter below are service defaults only.${NC}"
-    echo -e "${YELLOW}Your config file settings will take precedence at runtime.${NC}"
     echo ""
 fi
 
@@ -49,6 +48,7 @@ fi
 
 # Get VM name for logging
 VM_NAME=$(qm config "$VMID" | grep "^name:" | awk '{print $2}')
+VM_NAME=${VM_NAME:-windows-vm}
 echo -e "${GREEN}Found VM: $VM_NAME (ID: $VMID)${NC}"
 
 # Get idle threshold
@@ -77,8 +77,31 @@ chmod +x "$INSTALL_DIR/proxmox-sleep-manager.sh"
 chmod +x "$INSTALL_DIR/proxmox-idle-monitor.sh"
 echo -e "${GREEN}✓ Scripts installed to $INSTALL_DIR${NC}"
 
-# Install systemd services with configured values
+# Install systemd services
 echo "Installing systemd services..."
+cp "$SCRIPT_DIR/proxmox-sleep-manager.service" "$SYSTEMD_DIR/"
+cp "$SCRIPT_DIR/proxmox-idle-monitor.service" "$SYSTEMD_DIR/"
+echo -e "${GREEN}✓ Systemd services installed${NC}"
+
+# Reload systemd
+systemctl daemon-reload
+
+# Create log files
+touch /var/log/proxmox-sleep-manager.log
+touch /var/log/proxmox-idle-monitor.log
+chmod 644 /var/log/proxmox-sleep-manager.log
+chmod 644 /var/log/proxmox-idle-monitor.log
+
+# Install logrotate config
+cp "$SCRIPT_DIR/proxmox-sleep.logrotate" /etc/logrotate.d/proxmox-sleep
+echo -e "${GREEN}✓ Logrotate config installed${NC}"
+
+# Install documentation
+mkdir -p "$DOC_DIR/examples"
+cp "$SCRIPT_DIR/proxmox-sleep.conf.example" "$DOC_DIR/examples/"
+cp "$SCRIPT_DIR/README.md" "$DOC_DIR/" 2>/dev/null || true
+cp "$SCRIPT_DIR/LICENSE" "$DOC_DIR/" 2>/dev/null || true
+echo -e "${GREEN}✓ Documentation installed${NC}"
 
 # Escape special characters for sed replacement (& \ /)
 escape_sed() {
@@ -89,21 +112,17 @@ ESCAPED_VMID=$(escape_sed "$VMID")
 ESCAPED_VM_NAME=$(escape_sed "$VM_NAME")
 ESCAPED_IDLE_MINUTES=$(escape_sed "$IDLE_MINUTES")
 
-# Copy and configure sleep manager service
-cp "$SCRIPT_DIR/proxmox-sleep-manager.service" "$SYSTEMD_DIR/"
-sed -i "s/__VMID__/$ESCAPED_VMID/g" "$SYSTEMD_DIR/proxmox-sleep-manager.service"
-sed -i "s/__VM_NAME__/$ESCAPED_VM_NAME/g" "$SYSTEMD_DIR/proxmox-sleep-manager.service"
-
-# Copy and configure idle monitor service
-cp "$SCRIPT_DIR/proxmox-idle-monitor.service" "$SYSTEMD_DIR/"
-sed -i "s/__VMID__/$ESCAPED_VMID/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
-sed -i "s/__VM_NAME__/$ESCAPED_VM_NAME/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
-sed -i "s/__IDLE_MINUTES__/$ESCAPED_IDLE_MINUTES/g" "$SYSTEMD_DIR/proxmox-idle-monitor.service"
-
-echo -e "${GREEN}✓ Systemd services installed${NC}"
-
-# Reload systemd
-systemctl daemon-reload
+# Create or update config file
+if [[ ! -f /etc/proxmox-sleep.conf ]]; then
+    cp "$SCRIPT_DIR/proxmox-sleep.conf.example" /etc/proxmox-sleep.conf
+    sed -i "s/^VMID=.*/VMID=$ESCAPED_VMID/" /etc/proxmox-sleep.conf
+    sed -i "s/^VM_NAME=.*/VM_NAME=\"$ESCAPED_VM_NAME\"/" /etc/proxmox-sleep.conf
+    sed -i "s/^IDLE_THRESHOLD_MINUTES=.*/IDLE_THRESHOLD_MINUTES=$ESCAPED_IDLE_MINUTES/" /etc/proxmox-sleep.conf
+    echo -e "${GREEN}✓ Config file created at /etc/proxmox-sleep.conf${NC}"
+else
+    echo -e "${YELLOW}⚠ Config file already exists at /etc/proxmox-sleep.conf${NC}"
+    echo -e "${YELLOW}  Edit /etc/proxmox-sleep.conf to change settings.${NC}"
+fi
 
 # Enable services
 echo ""
@@ -120,30 +139,6 @@ else
     echo -e "${YELLOW}⚠ Idle monitor not enabled (you can enable later with: systemctl enable --now proxmox-idle-monitor)${NC}"
 fi
 
-# Create log files
-touch /var/log/proxmox-sleep-manager.log
-touch /var/log/proxmox-idle-monitor.log
-chmod 644 /var/log/proxmox-sleep-manager.log
-chmod 644 /var/log/proxmox-idle-monitor.log
-
-# Install logrotate config
-cp "$SCRIPT_DIR/proxmox-sleep.logrotate" /etc/logrotate.d/proxmox-sleep
-echo -e "${GREEN}✓ Logrotate config installed${NC}"
-
-# Install config example if config doesn't exist
-if [[ ! -f /etc/proxmox-sleep.conf ]]; then
-    cp "$SCRIPT_DIR/proxmox-sleep.conf.example" /etc/proxmox-sleep.conf
-    # Update config with actual values (using escaped versions for sed safety)
-    sed -i "s/^VMID=.*/VMID=$ESCAPED_VMID/" /etc/proxmox-sleep.conf
-    sed -i "s/^VM_NAME=.*/VM_NAME=\"$ESCAPED_VM_NAME\"/" /etc/proxmox-sleep.conf
-    sed -i "s/^IDLE_THRESHOLD_MINUTES=.*/IDLE_THRESHOLD_MINUTES=$ESCAPED_IDLE_MINUTES/" /etc/proxmox-sleep.conf
-    echo -e "${GREEN}✓ Config file created at /etc/proxmox-sleep.conf${NC}"
-else
-    echo -e "${YELLOW}⚠ Config file already exists at /etc/proxmox-sleep.conf${NC}"
-    echo -e "${YELLOW}  Your existing config file settings will be used (not the values entered above).${NC}"
-    echo -e "${YELLOW}  Edit /etc/proxmox-sleep.conf to change settings.${NC}"
-fi
-
 echo ""
 echo "=================================="
 echo -e "${GREEN}Installation Complete!${NC}"
@@ -151,6 +146,9 @@ echo "=================================="
 echo ""
 echo "Configuration:"
 echo "  /etc/proxmox-sleep.conf"
+echo ""
+echo "Next step - Install Windows idle helper:"
+echo "  proxmox-idle-monitor.sh install-helper"
 echo ""
 echo "Commands:"
 echo "  proxmox-sleep-manager.sh status   - Check sleep manager status"
@@ -164,9 +162,4 @@ echo ""
 echo "Services:"
 echo "  systemctl status proxmox-sleep-manager"
 echo "  systemctl status proxmox-idle-monitor"
-echo ""
-echo "To test:"
-echo "  1. Run: proxmox-idle-monitor.sh check"
-echo "  2. Run: proxmox-sleep-manager.sh hibernate"
-echo "  3. Then: systemctl suspend"
 echo ""

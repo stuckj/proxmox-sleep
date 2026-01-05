@@ -5,12 +5,12 @@ After=network.target pve-cluster.service
 [Service]
 Type=simple
 SyslogIdentifier=proxmox-idle-monitor
-Environment="PROXMOX_VMID=__VMID__"
-Environment="PROXMOX_VM_NAME=__VM_NAME__"
-Environment="IDLE_THRESHOLD_MINUTES=__IDLE_MINUTES__"
 ExecStart=/usr/local/bin/proxmox-idle-monitor.sh start
-Restart=always
+Restart=on-failure
 RestartSec=30
+# Exit code 78 = configuration error (EX_CONFIG from sysexits.h)
+# Don't restart if config is invalid - user needs to fix it first
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target
