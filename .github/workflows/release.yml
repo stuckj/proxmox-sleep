@@ -28,19 +28,11 @@ jobs:
             echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install build tools
+      - name: Install nfpm
         run: |
-          # Install nfpm for package building
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update
-          sudo apt-get install -y nfpm dpkg-dev createrepo-c gnupg
-
-      - name: Import GPG key
-        run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-          # Get the key ID for signing
-          KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
-          echo "GPG_KEY_ID=$KEY_ID" >> $GITHUB_ENV
+          sudo apt-get install -y nfpm
 
       - name: Build deb package
         run: |
@@ -49,18 +41,6 @@ jobs:
       - name: Build rpm package
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
-
-      - name: Sign deb package
-        run: |
-          # Sign the deb with dpkg-sig
-          sudo apt-get install -y dpkg-sig
-          dpkg-sig -k ${{ env.GPG_KEY_ID }} --sign builder *.deb
-
-      - name: Sign rpm package
-        run: |
-          # Configure RPM to use GPG
-          echo "%_gpg_name ${{ env.GPG_KEY_ID }}" >> ~/.rpmmacros
-          rpm --addsign *.rpm
 
       - name: List built packages
         run: ls -la *.deb *.rpm
