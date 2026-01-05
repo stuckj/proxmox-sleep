@@ -1,0 +1,20 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: proxmox-sleep
+Label: proxmox-sleep
+Suite: stable
+Codename: stable
+Architectures: all
+Components: main
+Description: Proxmox Sleep Manager packages
+SHA256:
+ edb5456c23eff47a71e811c422b7427cf0fad7459ef8ba9cf3558ba776ff4811 732 main/binary-all/Packages
+ 109be705cf58253441ce428766a888bd9389abd9319b76a3ab3c20624a7eba2b 515 main/binary-all/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQQvoahCWwlGiNxScxbIdzzp2QiUlAUCaVs9UQAKCRDIdzzp2QiU
+lKgSAP4scOfIgL4HB+C+y/8Nc/8/j7ZoqhXukzoAhtNb4ipdiQD+IwGZkjI9/y45
+fT9tc8huPCVVcPDxefOLFuu7pRDC4wc=
+=AdeI
+-----END PGP SIGNATURE-----
