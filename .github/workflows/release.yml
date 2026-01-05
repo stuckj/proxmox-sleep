@@ -133,26 +133,22 @@ jobs:
 
           # Create Release file
           cd dists/stable
-          cat > Release << EOF
-          Origin: proxmox-sleep
-          Label: proxmox-sleep
-          Suite: stable
-          Codename: stable
-          Architectures: all
-          Components: main
-          Description: Proxmox Sleep Manager packages
-          EOF
+          cat > Release << 'EOF'
+Origin: proxmox-sleep
+Label: proxmox-sleep
+Suite: stable
+Codename: stable
+Architectures: all
+Components: main
+Description: Proxmox Sleep Manager packages
+EOF
 
           # Add checksums to Release file
           echo "SHA256:" >> Release
           for f in main/binary-all/Packages main/binary-all/Packages.gz; do
             if [[ -f "$f" ]]; then
-              sha256sum "$f" | awk '{print " " $1 " " length " " $2}' >> Release
-              # Fix: get actual file size
               SIZE=$(stat -c%s "$f")
               SHA=$(sha256sum "$f" | awk '{print $1}')
-              # Rewrite with correct format
-              sed -i "/$f/d" Release
               echo " $SHA $SIZE $f" >> Release
             fi
           done
