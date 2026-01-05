@@ -129,14 +129,22 @@ jobs:
           # Create directory structure
           mkdir -p apt/pool/main
           mkdir -p apt/dists/stable/main/binary-all
+          mkdir -p apt/dists/stable/main/binary-amd64
+          mkdir -p apt/dists/stable/main/binary-arm64
 
           # Copy deb package to pool
           cp ../packages/*.deb apt/pool/main/
 
-          # Generate Packages file
+          # Generate Packages file for binary-all (where our arch-independent package lives)
           cd apt
           dpkg-scanpackages --arch all pool/ > dists/stable/main/binary-all/Packages
           gzip -k -f dists/stable/main/binary-all/Packages
+
+          # Create empty Packages files for other architectures (prevents apt warnings)
+          touch dists/stable/main/binary-amd64/Packages
+          gzip -k -f dists/stable/main/binary-amd64/Packages
+          touch dists/stable/main/binary-arm64/Packages
+          gzip -k -f dists/stable/main/binary-arm64/Packages
 
           # Create Release file
           cd dists/stable
@@ -144,14 +152,16 @@ jobs:
           echo "Label: proxmox-sleep" >> Release
           echo "Suite: stable" >> Release
           echo "Codename: stable" >> Release
-          echo "Architectures: all" >> Release
+          echo "Architectures: amd64 arm64 all" >> Release
           echo "Components: main" >> Release
           echo "Description: Proxmox Sleep Manager packages" >> Release
           echo "Date: $(date -Ru)" >> Release
 
           # Add checksums to Release file
           echo "SHA256:" >> Release
-          for f in main/binary-all/Packages main/binary-all/Packages.gz; do
+          for f in main/binary-all/Packages main/binary-all/Packages.gz \
+                   main/binary-amd64/Packages main/binary-amd64/Packages.gz \
+                   main/binary-arm64/Packages main/binary-arm64/Packages.gz; do
             if [[ -f "$f" ]]; then
               SIZE=$(stat -c%s "$f")
               SHA=$(sha256sum "$f" | awk '{print $1}')
