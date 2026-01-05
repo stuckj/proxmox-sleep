@@ -13,6 +13,8 @@ description: |
 vendor: stuckj
 homepage: https://github.com/stuckj/proxmox-sleep
 license: MIT
+priority: optional
+section: admin
 
 # Package dependencies
 depends:
@@ -78,7 +80,3 @@ rpm:
   group: System Environment/Daemons
   summary: Proxmox Sleep Manager - VM hibernation and idle monitoring
 
-# Deb-specific settings
-deb:
-  priority: optional
-  section: admin
