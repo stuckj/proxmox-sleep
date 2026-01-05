@@ -1,0 +1,19 @@
+Package: proxmox-sleep
+Version: 0.9.2
+Architecture: all
+Maintainer: stuckj <stuckj@users.noreply.github.com>
+Installed-Size: 58
+Recommends: logrotate
+Filename: pool/main/proxmox-sleep_0.9.2_all.deb
+Size: 19894
+MD5sum: 8d321e3647e889008b0a7eb2b5b78f31
+SHA1: f85bac3a55ba8203fce9d2a917bb8729961cac82
+SHA256: 13238d5891150ae9d0c983ff5a5403444608d17f69b8e2b9312d36383cb8c141
+Section: admin
+Priority: optional
+Homepage: https://github.com/stuckj/proxmox-sleep
+Description: Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.
+ Hibernates Windows VM before host sleep and resumes it after wake.
+ Includes idle monitoring to auto-sleep when system is inactive.
+License: MIT
+

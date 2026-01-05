@@ -8,14 +8,14 @@ Codename: stable
 Architectures: all
 Components: main
 Description: Proxmox Sleep Manager packages
-Date: Mon, 05 Jan 2026 04:41:04 +0000
+Date: Mon, 05 Jan 2026 04:50:10 +0000
 SHA256:
- 72ad08f023a9a97621decfa8b4a3ec7b157fe220f07dc8aedfdef8338acfde1f 706 main/binary-all/Packages
- 1b4f95d7afb06c1d8cec374cea0a66d04fd59539241ccddcd48285dce37d83e4 499 main/binary-all/Packages.gz
+ 9ee65b49d9652356344ba813a0db967f6c212e7dc4dc67d4727853a6499eeff5 698 main/binary-all/Packages
+ 287bffe898abcc95178398cf7d7ce1f2898fbc829ba994a7120909205555ac8d 497 main/binary-all/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQQvoahCWwlGiNxScxbIdzzp2QiUlAUCaVtA4QAKCRDIdzzp2QiU
-lMUQAQCzQMs4nxIxUunU2nhzOTjjME1+L6I9ocsvk+Hw1M9EqgD/R7rrcJdUhlF4
-UAcxELW9KQso8MPDlUSuEYY1EZaOzAE=
-=rvHg
+iHUEARYKAB0WIQQvoahCWwlGiNxScxbIdzzp2QiUlAUCaVtDAwAKCRDIdzzp2QiU
+lOOdAQCupMif7tcz1VDQsvtiD8mSGWtHbXCzf50Gf3uNhU/TdgEA+0QsJevtNfHC
+phltTIxP0BCfEBQCJmQNwN+mUZQpqAo=
+=RVTp
 -----END PGP SIGNATURE-----
