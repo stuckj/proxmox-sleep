@@ -11,6 +11,9 @@ on:
         required: true
         default: '0.9.0'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
