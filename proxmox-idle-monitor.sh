@@ -27,11 +27,11 @@ WAKE_TIME_FILE="/tmp/proxmox-idle-monitor.wake"
 
 # Gaming processes - prevent sleep when these are running in Windows VM
 # Set to empty string in config to disable gaming process detection
-GAMING_PROCESSES="${GAMING_PROCESSES:-steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe}"
+GAMING_PROCESSES="${GAMING_PROCESSES-steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe}"
 
 # Host blocking processes - prevent sleep when these are running on the Proxmox host
 # Set to empty string in config to disable host process detection
-HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES:-}"
+HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES-}"
 
 # Helper to parse JSON output from qm guest exec
 # Extracts the value from "out-data" field
