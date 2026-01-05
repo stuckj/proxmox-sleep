@@ -3,13 +3,12 @@ Version: 0.0.0~rc0
 Architecture: all
 Maintainer: stuckj <stuckj@users.noreply.github.com>
 Installed-Size: 58
-Depends: qemu-guest-agent
 Recommends: logrotate
 Filename: pool/main/proxmox-sleep_0.0.0~rc0_all.deb
-Size: 19916
-MD5sum: ea48bbb15582b0c65351262fe9126318
-SHA1: 801ff3017eebf6f0f686d0a631a53e8b8afefbea
-SHA256: 0b75d8f2bf9c106db54aebd69d0f6a2b507afce23296afe6cd1850bd2336a525
+Size: 19898
+MD5sum: 4f14d495e6caaaedb2073881cb50a9e2
+SHA1: 4d820161f975364055ebf56c7fea99e2f3ae8f47
+SHA256: d7ae0ae3d11fef1ac73a603197ce6d7d3f53c37269fa1c1101c31420a8ba554d
 Section: admin
 Priority: optional
 Homepage: https://github.com/stuckj/proxmox-sleep

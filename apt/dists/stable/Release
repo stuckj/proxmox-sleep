@@ -5,6 +5,7 @@ Codename: stable
 Architectures: all
 Components: main
 Description: Proxmox Sleep Manager packages
+Date: Mon, 05 Jan 2026 04:41:04 +0000
 SHA256:
- edb5456c23eff47a71e811c422b7427cf0fad7459ef8ba9cf3558ba776ff4811 732 main/binary-all/Packages
- 109be705cf58253441ce428766a888bd9389abd9319b76a3ab3c20624a7eba2b 515 main/binary-all/Packages.gz
+ 72ad08f023a9a97621decfa8b4a3ec7b157fe220f07dc8aedfdef8338acfde1f 706 main/binary-all/Packages
+ 1b4f95d7afb06c1d8cec374cea0a66d04fd59539241ccddcd48285dce37d83e4 499 main/binary-all/Packages.gz
