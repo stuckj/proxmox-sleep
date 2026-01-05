@@ -133,15 +133,13 @@ jobs:
 
           # Create Release file
           cd dists/stable
-          cat > Release << 'EOF'
-Origin: proxmox-sleep
-Label: proxmox-sleep
-Suite: stable
-Codename: stable
-Architectures: all
-Components: main
-Description: Proxmox Sleep Manager packages
-EOF
+          echo "Origin: proxmox-sleep" > Release
+          echo "Label: proxmox-sleep" >> Release
+          echo "Suite: stable" >> Release
+          echo "Codename: stable" >> Release
+          echo "Architectures: all" >> Release
+          echo "Components: main" >> Release
+          echo "Description: Proxmox Sleep Manager packages" >> Release
 
           # Add checksums to Release file
           echo "SHA256:" >> Release
