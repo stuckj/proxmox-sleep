@@ -4,7 +4,7 @@
 name: proxmox-sleep
 arch: all
 platform: linux
-version: ${VERSION:-0.9.0}
+version: "${VERSION}"
 maintainer: stuckj <stuckj@users.noreply.github.com>
 description: |
   Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.
