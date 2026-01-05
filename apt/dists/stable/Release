@@ -2,10 +2,14 @@ Origin: proxmox-sleep
 Label: proxmox-sleep
 Suite: stable
 Codename: stable
-Architectures: all
+Architectures: amd64 arm64 all
 Components: main
 Description: Proxmox Sleep Manager packages
-Date: Mon, 05 Jan 2026 04:50:10 +0000
+Date: Mon, 05 Jan 2026 12:32:41 +0000
 SHA256:
- 9ee65b49d9652356344ba813a0db967f6c212e7dc4dc67d4727853a6499eeff5 698 main/binary-all/Packages
- 287bffe898abcc95178398cf7d7ce1f2898fbc829ba994a7120909205555ac8d 497 main/binary-all/Packages.gz
+ 45fc19bb581543a6808dbc7c08726bf3fae6399a1fbe78c04fca4cc895b5e9fd 698 main/binary-all/Packages
+ 63d82a43d821d270801c4320cae986622fe3dce05c8451b7897ca45f67331225 494 main/binary-all/Packages.gz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-amd64/Packages
+ 162a647e9f7f95158331617f2e14ef3a1dec1765f7052fd3e12b69ea8dedaa84 29 main/binary-amd64/Packages.gz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-arm64/Packages
+ 162a647e9f7f95158331617f2e14ef3a1dec1765f7052fd3e12b69ea8dedaa84 29 main/binary-arm64/Packages.gz
