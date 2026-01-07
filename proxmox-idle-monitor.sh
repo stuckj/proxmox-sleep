@@ -95,9 +95,9 @@ validate_config() {
         errors=$((errors + 1))
     fi
 
-    # Check idle threshold is a positive number
-    if ! is_positive_int "$IDLE_THRESHOLD_MINUTES" || [[ "$IDLE_THRESHOLD_MINUTES" -eq 0 ]]; then
-        echo "ERROR: IDLE_THRESHOLD_MINUTES must be a positive number (current: '$IDLE_THRESHOLD_MINUTES')" >&2
+    # Check idle threshold is a non-negative integer (0 disables auto-sleep)
+    if ! [[ "$IDLE_THRESHOLD_MINUTES" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: IDLE_THRESHOLD_MINUTES must be a non-negative integer (current: '$IDLE_THRESHOLD_MINUTES')" >&2
         errors=$((errors + 1))
     fi
 
