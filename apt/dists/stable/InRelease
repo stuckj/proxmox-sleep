@@ -8,18 +8,18 @@ Codename: stable
 Architectures: amd64 arm64 all
 Components: main
 Description: Proxmox Sleep Manager packages
-Date: Sat, 10 Jan 2026 05:51:45 +0000
+Date: Sat, 10 Jan 2026 18:31:33 +0000
 SHA256:
- 7fcfcbb9267b634cf84a9f4b3451091d6f4b664f238e27c6055ea0982e97bdc4 698 main/binary-all/Packages
- 2f8e255c6e17144a1799bdd7b5cfefda5fd80441e275cad3d1096eb08abd136c 496 main/binary-all/Packages.gz
+ dcd0d183bf86416922de38eead3043f6f6f957387c10aaedbc4ba8cd1c1317d5 698 main/binary-all/Packages
+ 92fceda7aed2d50cea09fb327c5746a1c7076e5d114692a2cc71d6e745a21652 498 main/binary-all/Packages.gz
  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-amd64/Packages
- 25e6dec18b969c7bc3f701f7ce8071b69e45aa4a8cb97d8b603b50add5cc6def 29 main/binary-amd64/Packages.gz
+ b586d359c494a0af95fbfbc39166b52b25f5a467068019245ddcf711463be374 29 main/binary-amd64/Packages.gz
  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-arm64/Packages
- 25e6dec18b969c7bc3f701f7ce8071b69e45aa4a8cb97d8b603b50add5cc6def 29 main/binary-arm64/Packages.gz
+ b586d359c494a0af95fbfbc39166b52b25f5a467068019245ddcf711463be374 29 main/binary-arm64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQQvoahCWwlGiNxScxbIdzzp2QiUlAUCaWHo8gAKCRDIdzzp2QiU
-lIlUAP96FVQ0SWeEVklSj3WVt5IVDSndb4pFG7srWVB++FlLQgEA9dIcqjQZ+V9g
-GiIBWP6/UBZ+Xxxiq9sz+rjUPhgPOQY=
-=qALb
+iHUEARYKAB0WIQQvoahCWwlGiNxScxbIdzzp2QiUlAUCaWKbBgAKCRDIdzzp2QiU
+lFfrAP4y20WvlBLFoBpVunqeyXttNKjqrzc+DsXrPv92VBb4CAEAtmoi2P/JqzI+
+XwLpNn7Y5ziPyUSmN3tzM5n+Upn7Sw4=
+=5HQU
 -----END PGP SIGNATURE-----
