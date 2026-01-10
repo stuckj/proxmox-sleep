@@ -664,7 +664,15 @@ log() {
 
 ### Potential Enhancements
 
-1. **Multi-VM Support**: Manage multiple VMs with different policies
+See [TODO.md](../TODO.md) for detailed specifications on planned major enhancements.
+
+1. **Multi-VM Support with Agent Architecture** (detailed in TODO.md):
+   - Monitor multiple VMs to determine host sleep eligibility
+   - Per-VM configuration: hibernate, shutdown, keep running, or ignore
+   - Per-VM resume-on-wake settings
+   - Delegate idle detection to in-VM agents (move checks from host to guest)
+   - Cross-platform agents: Windows (enhance existing), Linux (GUI + CLI), macOS (via SSH)
+
 2. **Network-Based Wake**: Integration with Wake-on-LAN triggers
 3. **Scheduled Sleep Windows**: Time-based sleep policies (e.g., always sleep 2-6 AM)
 4. **Power Monitoring**: Integration with smart plugs for actual power usage data
