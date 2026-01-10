@@ -1,0 +1,79 @@
+# Proxmox Sleep Manager Configuration
+# Copy this file to /etc/proxmox-sleep.conf and customize
+
+# VM Configuration
+# The Proxmox VM ID of your Windows VM
+VMID=100
+
+# VM name (used for logging only)
+VM_NAME="windows"
+
+# Idle Monitor Settings
+# Minutes of idle time before auto-sleep (0 to disable auto-sleep)
+IDLE_THRESHOLD_MINUTES=15
+
+# Check interval in seconds
+CHECK_INTERVAL=60
+
+# CPU usage threshold (percentage) - VM is "active" if above this
+CPU_IDLE_THRESHOLD=15
+
+# GPU usage threshold (percentage) - VM is "active" if above this
+GPU_IDLE_THRESHOLD=10
+
+# GPU vendor in the Windows VM: "nvidia", "amd", or "auto"
+# "auto" will try nvidia first, then amd, then Windows performance counters
+GPU_VENDOR=auto
+
+# Check for active SSH sessions on the host (1=enabled, 0=disabled)
+# Disable this for debugging so you can SSH in without preventing sleep
+CHECK_SSH_SESSIONS=1
+
+# Hibernation Settings
+# Maximum seconds to wait for Windows to hibernate
+HIBERNATE_TIMEOUT=300
+
+# Seconds to wait after host wake before starting VM
+WAKE_DELAY=5
+
+# Grace period after wake (seconds) - prevent immediate re-sleep after waking
+# This is a safety net to ensure the system has time to stabilize before
+# the idle monitor can trigger another sleep cycle
+WAKE_GRACE_PERIOD=60
+
+# Gaming Process Detection
+# Comma-separated list of process names (in Windows VM) that indicate gaming activity
+# The system won't auto-sleep if any of these are running
+# Set to empty string to disable gaming process detection
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
+
+# Host Blocking Process Detection
+# Comma-separated list of process names on the Proxmox HOST that prevent sleep
+# when actively running. Use this for maintenance tasks like updates.
+# Note: This checks for running PROCESSES, not services - the unattended-upgrade
+# service runs continuously but only spawns the unattended-upgrade process during updates.
+# Set to empty string to disable host process detection
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+
+# Host Blocking Systemd Units
+# Comma-separated list of systemd unit names that prevent sleep while active.
+# Only include "oneshot" services that run temporarily during actual work.
+# Don't include long-running daemons like unattended-upgrades.service here
+# (use HOST_BLOCKING_PROCESSES for those instead).
+# Set to empty string to disable systemd unit detection
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
+
+# Sleep Inhibitor Detection
+# Check for systemd sleep inhibitors (applications that have registered to block sleep)
+# Examples: media players, file transfers, presentations, etc.
+# Only inhibitors that block or delay "sleep" are considered.
+# Set to 0 to disable sleep inhibitor detection
+CHECK_SLEEP_INHIBITORS=1
+
+# Logging
+# Log file locations
+SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
+IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
+
+# Enable debug logging (1=enabled, 0=disabled)
+DEBUG=0

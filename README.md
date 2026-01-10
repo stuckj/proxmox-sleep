@@ -1,0 +1,369 @@
+# Proxmox Sleep Manager
+
+Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.
+
+## The Problem
+
+- Gaming desktop runs Proxmox with Windows 11 VM + GPU passthrough
+- Machine draws ~150W idle, but only used a few hours per week
+- Native sleep (S3) with GPU passthrough often causes issues (crashes, ZFS corruption)
+- Windows VM suspend via QEMU doesn't survive host sleep
+- Want the machine to auto-sleep when idle
+
+## The Solution
+
+This project provides two components:
+
+1. **Sleep Manager**: Automatically hibernates the Windows VM before host sleep and resumes it after wake
+2. **Idle Monitor**: Detects when the system is truly idle and triggers sleep
+
+### How It Works
+
+```
+Host Going to Sleep:
+┌─────────────┐    ┌──────────────────┐    ┌─────────────┐    ┌────────────┐
+│ systemctl   │───>│ sleep-manager    │───>│ Windows     │───>│ Host       │
+│ suspend     │    │ (pre-sleep hook) │    │ hibernates  │    │ sleeps     │
+└─────────────┘    └──────────────────┘    └─────────────┘    └────────────┘
+
+Host Waking Up:
+┌─────────────┐    ┌──────────────────┐    ┌─────────────┐
+│ Host wakes  │───>│ sleep-manager    │───>│ VM starts   │
+│             │    │ (post-wake hook) │    │ (resumes    │
+│             │    │                  │    │ from hib.)  │
+└─────────────┘    └──────────────────┘    └─────────────┘
+```
+
+Windows hibernation writes RAM to disk, so when the VM starts, it resumes exactly where it left off.
+
+## Requirements
+
+- Proxmox VE (tested on 7.x and 8.x)
+- Windows VM with QEMU Guest Agent installed
+- Hibernation enabled in Windows (usually is by default)
+- GPU passthrough with NVIDIA or AMD graphics card
+
+### Enabling Windows Hibernation
+
+If hibernation is disabled, enable it in an elevated PowerShell:
+```powershell
+powercfg /hibernate on
+```
+
+## Installation
+
+### Option 1: Install from Repository (Recommended)
+
+**Debian/Ubuntu/Proxmox (APT):**
+
+```bash
+# Add the GPG key
+curl -fsSL https://stuckj.github.io/proxmox-sleep/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/proxmox-sleep.gpg
+
+# Add the repository
+echo "deb [signed-by=/usr/share/keyrings/proxmox-sleep.gpg] https://stuckj.github.io/proxmox-sleep/apt stable main" | sudo tee /etc/apt/sources.list.d/proxmox-sleep.list
+
+# Install
+sudo apt update
+sudo apt install proxmox-sleep
+```
+
+**RHEL/CentOS/Fedora (YUM/DNF):**
+
+```bash
+# Add the repository
+sudo tee /etc/yum.repos.d/proxmox-sleep.repo << 'EOF'
+[proxmox-sleep]
+name=Proxmox Sleep Manager
+baseurl=https://stuckj.github.io/proxmox-sleep/yum
+enabled=1
+gpgcheck=1
+gpgkey=https://stuckj.github.io/proxmox-sleep/yum/gpg-key.asc
+EOF
+
+# Install
+sudo dnf install proxmox-sleep
+```
+
+After installation, configure the package:
+
+```bash
+# Copy the example config
+cp /usr/share/doc/proxmox-sleep/examples/proxmox-sleep.conf.example /etc/proxmox-sleep.conf
+
+# Edit the config and set your VM ID
+nano /etc/proxmox-sleep.conf
+
+# Enable the idle monitor (sleep manager is already enabled)
+systemctl enable --now proxmox-idle-monitor
+```
+
+### Option 2: Install from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/stuckj/proxmox-sleep.git
+cd proxmox-sleep
+
+# Run the installer (as root)
+./install.sh
+```
+
+### Step 2: Install Windows Idle Helper (Required)
+
+> **Important**: This step is required for proper keyboard/mouse idle detection with USB passthrough devices.
+
+The QEMU guest agent runs as SYSTEM in Windows session 0, which cannot detect user input from USB passthrough keyboards and mice. A small helper application must run in your Windows user session to track idle time.
+
+From the Proxmox host, run:
+```bash
+proxmox-idle-monitor.sh install-helper
+```
+
+This installs a Windows scheduled task that:
+- Runs automatically at user logon
+- Displays a **system tray icon** showing current idle time (hover to see)
+- Updates idle time every 10 seconds
+- Can be exited by right-clicking the tray icon
+
+The tray icon appears as an "i" (information) icon and shows "Idle: Xm Ys" when you hover over it.
+
+## Usage
+
+### Check Status
+```bash
+# Full status with idle tracking info
+proxmox-idle-monitor.sh status
+
+# Quick idle check (for testing)
+proxmox-idle-monitor.sh check
+
+# Detailed debug output
+DEBUG=1 proxmox-idle-monitor.sh check
+
+# Sleep manager status
+proxmox-sleep-manager.sh status
+```
+
+### Sleep Now (Manual Sleep)
+```bash
+# Immediately hibernate VM and sleep the host
+proxmox-idle-monitor.sh sleep-now
+```
+
+This is useful for:
+- Testing the sleep/wake cycle
+- Manually sleeping the machine without waiting for idle timeout
+- Quick shutdown when leaving
+
+### Other Operations
+```bash
+# Hibernate the VM only (without sleeping host)
+proxmox-sleep-manager.sh hibernate
+
+# Reset idle tracking (restart the countdown)
+proxmox-idle-monitor.sh reset
+
+# Reinstall Windows idle helper
+proxmox-idle-monitor.sh install-helper
+
+# Wake: use Wake-on-LAN or press power button
+```
+
+### Logs
+```bash
+tail -f /var/log/proxmox-sleep-manager.log
+tail -f /var/log/proxmox-idle-monitor.log
+```
+
+## Configuration
+
+All settings can be configured in `/etc/proxmox-sleep.conf`:
+
+```bash
+# VM Configuration
+VMID=100                          # Your Windows VM ID
+VM_NAME="windows"                 # VM name (for logging only)
+
+# Idle Monitor Settings
+IDLE_THRESHOLD_MINUTES=15         # Minutes of idle before auto-sleep (0 to disable)
+CHECK_INTERVAL=60                 # How often to check idle status (seconds)
+CPU_IDLE_THRESHOLD=15             # VM CPU % above this = active
+GPU_IDLE_THRESHOLD=10             # GPU % above this = active
+GPU_VENDOR=auto                   # nvidia, amd, or auto
+CHECK_SSH_SESSIONS=1              # Prevent sleep if SSH sessions active (1=on, 0=off)
+
+# Hibernation Settings
+HIBERNATE_TIMEOUT=300             # Max seconds to wait for Windows hibernation
+WAKE_DELAY=5                      # Seconds to wait after wake before starting VM
+WAKE_GRACE_PERIOD=60              # Seconds after wake before allowing sleep again
+
+# Gaming Process Detection (in Windows VM)
+# Set to "" to disable
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,..."
+
+# Host Blocking Processes (on Proxmox host)
+# Sleep is prevented when these processes are running on the host
+# Set to "" to disable
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+
+# Host Blocking Systemd Units
+# Sleep is prevented when these systemd units are active (for oneshot services)
+# Set to "" to disable
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
+
+# Sleep Inhibitor Detection
+# Check for systemd sleep inhibitors (e.g., media players, file transfers)
+CHECK_SLEEP_INHIBITORS=1              # 1=on, 0=off
+
+# Logging
+SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
+IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
+DEBUG=0                           # Set to 1 for verbose logging
+```
+
+See `proxmox-sleep.conf.example` for the complete reference.
+
+Environment variables override config file settings, which override defaults.
+
+## Idle Detection
+
+The idle monitor checks multiple signals:
+
+| Check | Method | Notes |
+|-------|--------|-------|
+| VM CPU Usage | Proxmox API | Above threshold = active |
+| GPU Usage | Guest Agent (nvidia-smi/perf counters) | NVIDIA, AMD supported |
+| Windows Idle Time | Tray Helper App | Requires install-helper |
+| Windows Power Requests | Guest Agent (powercfg) | Media players, downloads, etc. |
+| Gaming Processes | Guest Agent (Get-Process) | Configurable process list |
+| SSH Sessions | Host `who` command | Optional, can disable |
+| Host Blocking Processes | Host `pgrep` | e.g., unattended-upgrade |
+| Host Blocking Units | `systemctl is-active` | apt-daily, apt-daily-upgrade |
+| Sleep Inhibitors | `systemd-inhibit --list` | Media players, file transfers |
+
+All must indicate "idle" for the configured duration before triggering sleep.
+
+### Windows Idle Helper
+
+The idle helper is essential for accurate keyboard/mouse detection. Without it:
+- The system falls back to screensaver/lock detection only
+- USB passthrough input won't be detected
+- The system may sleep while you're actively using it
+
+The helper runs silently with a system tray icon. If the icon is missing, reinstall:
+```bash
+proxmox-idle-monitor.sh install-helper
+```
+
+### Power Request Filtering
+
+Windows applications can request the system stay awake (e.g., media players, downloads). The idle monitor detects these via `powercfg /requests`.
+
+Some system-level requests are filtered as noise:
+- "Legacy Kernel Caller" - AMD CPU power management
+- "Sleep Idle State Disabled" - System idle tracking
+
+These don't indicate real user activity and are ignored.
+
+### GPU Detection
+
+- **NVIDIA**: Uses `nvidia-smi` inside the Windows VM
+- **AMD**: Uses Windows performance counters
+- **Auto** (default): Tries NVIDIA first, then AMD, then generic Windows counters
+
+### Customizing Gaming Detection
+
+Edit `/etc/proxmox-sleep.conf`:
+
+```bash
+# Customize the process list (include any launchers or games you want detected)
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Cyberpunk2077.exe,eldenring.exe"
+
+# Or disable gaming process detection entirely
+GAMING_PROCESSES=""
+```
+
+## Trying Native Sleep Instead
+
+If you want to try making native S3 sleep work with your GPU passthrough (faster wake times), see `NATIVE_SLEEP_TROUBLESHOOTING.md`.
+
+Native sleep is ideal but often problematic with NVIDIA GPUs. This hibernation-based approach is the reliable fallback.
+
+## Troubleshooting
+
+### "Guest agent not responsive"
+- Check Windows Services → "QEMU Guest Agent" is running
+- Test: `qm guest cmd <VMID> ping`
+
+### VM doesn't resume from hibernation
+- Check if hibernation works manually in Windows (Start → Power → Hibernate)
+- If no Hibernate option: `powercfg /hibernate on` in admin PowerShell
+- Check disk space (needs ~RAM size free for hiberfil.sys)
+
+### Host crashes/reboots on sleep
+- Your hardware may not support S3 sleep well
+- Try S2idle instead: `echo s2idle > /sys/power/mem_sleep`
+- Check BIOS for sleep-related settings
+
+### Auto-sleep not triggering
+```bash
+# Debug mode shows all checks
+DEBUG=1 proxmox-idle-monitor.sh check
+```
+
+### Windows Idle Time shows -1 or 99999
+The Windows idle helper isn't running or isn't installed:
+```bash
+# Install/reinstall the helper
+proxmox-idle-monitor.sh install-helper
+```
+
+Then log out and back in to Windows, or check Task Scheduler for "ProxmoxIdleHelper".
+
+### Tray icon not visible
+- Check Windows system tray overflow (click the ^ arrow)
+- The icon appears as an "i" (information icon)
+- Right-click to exit, then restart via Task Scheduler or re-run install-helper
+
+### GPU usage not detected
+```bash
+# Test NVIDIA detection
+qm guest exec <VMID> -- cmd /c "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits"
+
+# Check GPU_VENDOR setting in config
+grep GPU_VENDOR /etc/proxmox-sleep.conf
+```
+
+## Uninstalling
+
+### If installed from repository or package:
+
+```bash
+# Debian/Ubuntu/Proxmox:
+sudo apt remove proxmox-sleep
+# Optionally remove the repository:
+sudo rm /etc/apt/sources.list.d/proxmox-sleep.list
+sudo rm /usr/share/keyrings/proxmox-sleep.gpg
+
+# RHEL/CentOS/Fedora:
+sudo dnf remove proxmox-sleep
+# Optionally remove the repository:
+sudo rm /etc/yum.repos.d/proxmox-sleep.repo
+```
+
+### If installed from source:
+
+```bash
+./uninstall.sh
+```
+
+The config file (`/etc/proxmox-sleep.conf`) and log files are preserved after uninstall.
+
+## Contributing
+
+Contributions welcome! Please open an issue or PR.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.

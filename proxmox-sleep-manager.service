@@ -1,0 +1,16 @@
+[Unit]
+Description=Proxmox Sleep Manager - Hibernate Windows VM on sleep
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+SyslogIdentifier=proxmox-sleep-manager
+# Give hibernation time to complete (default systemd timeout is too short)
+TimeoutStopSec=600
+ExecStart=/usr/local/bin/proxmox-sleep-manager.sh pre-sleep
+ExecStop=/usr/local/bin/proxmox-sleep-manager.sh post-wake
+
+[Install]
+WantedBy=sleep.target

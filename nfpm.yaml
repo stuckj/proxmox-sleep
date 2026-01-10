@@ -1,0 +1,81 @@
+# nfpm configuration for building deb and rpm packages
+# See: https://nfpm.goreleaser.com/configuration/
+
+name: proxmox-sleep
+arch: all
+platform: linux
+version: "${VERSION}"
+maintainer: stuckj <stuckj@users.noreply.github.com>
+description: |
+  Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.
+  Hibernates Windows VM before host sleep and resumes it after wake.
+  Includes idle monitoring to auto-sleep when system is inactive.
+vendor: stuckj
+homepage: https://github.com/stuckj/proxmox-sleep
+license: MIT
+priority: optional
+section: admin
+
+# Package dependencies
+# Note: qemu-guest-agent must be installed in the Windows VM, not on the Proxmox host
+recommends:
+  - logrotate
+
+# Files to include in the package
+contents:
+  # Scripts
+  - src: proxmox-sleep-manager.sh
+    dst: /usr/local/bin/proxmox-sleep-manager.sh
+    file_info:
+      mode: 0755
+
+  - src: proxmox-idle-monitor.sh
+    dst: /usr/local/bin/proxmox-idle-monitor.sh
+    file_info:
+      mode: 0755
+
+  # Systemd services
+  - src: proxmox-sleep-manager.service
+    dst: /lib/systemd/system/proxmox-sleep-manager.service
+    file_info:
+      mode: 0644
+
+  - src: proxmox-idle-monitor.service
+    dst: /lib/systemd/system/proxmox-idle-monitor.service
+    file_info:
+      mode: 0644
+
+  # Logrotate config
+  - src: proxmox-sleep.logrotate
+    dst: /etc/logrotate.d/proxmox-sleep
+    file_info:
+      mode: 0644
+
+  # Example config (to documentation directory)
+  - src: proxmox-sleep.conf.example
+    dst: /usr/share/doc/proxmox-sleep/examples/proxmox-sleep.conf.example
+    file_info:
+      mode: 0644
+
+  # Documentation
+  - src: README.md
+    dst: /usr/share/doc/proxmox-sleep/README.md
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/doc/proxmox-sleep/LICENSE
+    file_info:
+      mode: 0644
+
+# Maintainer scripts
+scripts:
+  postinstall: packaging/scripts/postinst.sh
+  preremove: packaging/scripts/prerm.sh
+  postremove: packaging/scripts/postrm.sh
+
+# RPM-specific settings
+rpm:
+  group: System Environment/Daemons
+  summary: Proxmox Sleep Manager - VM hibernation and idle monitoring
+

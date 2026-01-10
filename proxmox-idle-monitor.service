@@ -1,0 +1,16 @@
+[Unit]
+Description=Proxmox Idle Monitor - Auto-sleep when system is idle
+After=network.target pve-cluster.service
+
+[Service]
+Type=simple
+SyslogIdentifier=proxmox-idle-monitor
+ExecStart=/usr/local/bin/proxmox-idle-monitor.sh start
+Restart=on-failure
+RestartSec=30
+# Exit code 78 = configuration error (EX_CONFIG from sysexits.h)
+# Don't restart if config is invalid - user needs to fix it first
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+/var/log/proxmox-sleep-manager.log /var/log/proxmox-idle-monitor.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
