@@ -207,6 +207,15 @@ GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,..."
 # Set to "" to disable
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
 
+# Host Blocking Systemd Units
+# Sleep is prevented when these systemd units are active (for oneshot services)
+# Set to "" to disable
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
+
+# Sleep Inhibitor Detection
+# Check for systemd sleep inhibitors (e.g., media players, file transfers)
+CHECK_SLEEP_INHIBITORS=1              # 1=on, 0=off
+
 # Logging
 SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
 IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
@@ -230,6 +239,8 @@ The idle monitor checks multiple signals:
 | Gaming Processes | Guest Agent (Get-Process) | Configurable process list |
 | SSH Sessions | Host `who` command | Optional, can disable |
 | Host Blocking Processes | Host `pgrep` | e.g., unattended-upgrade |
+| Host Blocking Units | `systemctl is-active` | apt-daily, apt-daily-upgrade |
+| Sleep Inhibitors | `systemd-inhibit --list` | Media players, file transfers |
 
 All must indicate "idle" for the configured duration before triggering sleep.
 
