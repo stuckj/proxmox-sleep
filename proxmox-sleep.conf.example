@@ -55,6 +55,19 @@ GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.ex
 # Set to empty string to disable host process detection
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
 
+# Host Blocking Systemd Units
+# Comma-separated list of systemd unit names that prevent sleep while active.
+# This is useful for blocking sleep during apt updates, package upgrades, etc.
+# Set to empty string to disable systemd unit detection
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service,unattended-upgrades.service"
+
+# Sleep Inhibitor Detection
+# Check for systemd sleep inhibitors (applications that have registered to block sleep)
+# Examples: media players, file transfers, presentations, etc.
+# Only inhibitors that block or delay "sleep" are considered.
+# Set to 0 to disable sleep inhibitor detection
+CHECK_SLEEP_INHIBITORS=1
+
 # Logging
 # Log file locations
 SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"

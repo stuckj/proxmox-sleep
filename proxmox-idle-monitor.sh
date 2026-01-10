@@ -33,6 +33,14 @@ GAMING_PROCESSES="${GAMING_PROCESSES-steam.exe,EpicGamesLauncher.exe,GalaxyClien
 # Set to empty string in config to disable host process detection
 HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES-}"
 
+# Systemd units that should block sleep while active (comma-separated)
+# Set to empty string in config to disable unit detection
+HOST_BLOCKING_UNITS="${HOST_BLOCKING_UNITS-apt-daily.service,apt-daily-upgrade.service,unattended-upgrades.service}"
+
+# Check for systemd sleep inhibitors (applications blocking sleep)
+# Set to 0 to disable sleep inhibitor detection
+CHECK_SLEEP_INHIBITORS="${CHECK_SLEEP_INHIBITORS:-1}"
+
 # Helper to parse JSON output from qm guest exec
 # Extracts the value from "out-data" field
 parse_guest_output() {
@@ -537,6 +545,140 @@ check_host_blocking_processes() {
     return 1  # No blocking processes found
 }
 
+# Check if any systemd units are active that should block sleep
+# (e.g., apt-daily.service, unattended-upgrades.service)
+check_host_blocking_units() {
+    # Skip if no blocking units configured
+    if [[ -z "$HOST_BLOCKING_UNITS" ]]; then
+        debug "Host blocking unit detection disabled (empty list)"
+        return 1  # No units to check = not detected
+    fi
+
+    # Convert comma-separated list to array
+    IFS=',' read -ra blocking_units <<< "$HOST_BLOCKING_UNITS"
+
+    for unit in "${blocking_units[@]}"; do
+        # Trim whitespace
+        unit=$(echo "$unit" | xargs)
+        [[ -z "$unit" ]] && continue
+
+        # Check if unit is active using systemctl
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            debug "Found active blocking unit: $unit"
+            return 0  # Blocking unit is active
+        fi
+    done
+
+    return 1  # No blocking units active
+}
+
+# Get list of active blocking units (for display)
+get_active_blocking_units() {
+    if [[ -z "$HOST_BLOCKING_UNITS" ]]; then
+        echo "none"
+        return
+    fi
+
+    local active_units=()
+    IFS=',' read -ra blocking_units <<< "$HOST_BLOCKING_UNITS"
+
+    for unit in "${blocking_units[@]}"; do
+        unit=$(echo "$unit" | xargs)
+        [[ -z "$unit" ]] && continue
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            active_units+=("$unit")
+        fi
+    done
+
+    if [[ ${#active_units[@]} -eq 0 ]]; then
+        echo "none"
+    else
+        echo "${active_units[*]}"
+    fi
+}
+
+# Check if there are systemd sleep inhibitors that would block/delay sleep
+# Only checks for inhibitors with "sleep" in the What field
+check_sleep_inhibitors() {
+    # Skip if sleep inhibitor check is disabled
+    if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then
+        debug "Sleep inhibitor detection disabled"
+        return 1  # Check disabled = not detected
+    fi
+
+    # Get list of inhibitors and check for sleep-blocking ones
+    # systemd-inhibit --list format: WHO, UID, PID, WHAT, WHY, MODE
+    # We look for inhibitors where WHAT contains "sleep" and MODE is "block" or "delay"
+    local inhibitor_list
+    inhibitor_list=$(systemd-inhibit --list --no-legend 2>/dev/null)
+
+    if [[ -z "$inhibitor_list" ]]; then
+        debug "No sleep inhibitors found"
+        return 1  # No inhibitors
+    fi
+
+    # Parse each line and check for sleep inhibitors
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        # The WHAT field can contain multiple colon-separated values like "sleep:shutdown"
+        # We need to check if "sleep" is one of them
+        # Column layout: WHO UID PID WHAT WHY MODE
+        # Using awk to get the WHAT field (4th column) and MODE field (last column)
+        local what mode
+        what=$(echo "$line" | awk '{print $4}')
+        mode=$(echo "$line" | awk '{print $NF}')
+
+        # Check if this inhibitor blocks or delays sleep
+        if [[ "$what" == *"sleep"* ]] && [[ "$mode" == "block" || "$mode" == "delay" ]]; then
+            debug "Found sleep inhibitor: $line"
+            return 0  # Sleep inhibitor found
+        fi
+    done <<< "$inhibitor_list"
+
+    debug "No sleep-blocking inhibitors found"
+    return 1  # No sleep inhibitors
+}
+
+# Get details of active sleep inhibitors (for display)
+get_sleep_inhibitors_detail() {
+    if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then
+        echo "disabled"
+        return
+    fi
+
+    local inhibitor_list
+    inhibitor_list=$(systemd-inhibit --list --no-legend 2>/dev/null)
+
+    if [[ -z "$inhibitor_list" ]]; then
+        echo "none"
+        return
+    fi
+
+    local details=()
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        local what mode who why
+        what=$(echo "$line" | awk '{print $4}')
+        mode=$(echo "$line" | awk '{print $NF}')
+        who=$(echo "$line" | awk '{print $1}')
+        # WHY is the 5th field but can contain spaces, so we extract it more carefully
+        # Skip first 4 fields and last field to get WHY
+        why=$(echo "$line" | awk '{$1=$2=$3=$4=""; $NF=""; print}' | xargs)
+
+        if [[ "$what" == *"sleep"* ]] && [[ "$mode" == "block" || "$mode" == "delay" ]]; then
+            details+=("$who: $why ($mode)")
+        fi
+    done <<< "$inhibitor_list"
+
+    if [[ ${#details[@]} -eq 0 ]]; then
+        echo "none"
+    else
+        printf '%s\n' "${details[@]}"
+    fi
+}
+
 # Check if any Windows process is requesting the system stay awake
 # This catches media players, downloads, presentations, etc.
 # Filters out known system noise like AMD CPU power management
@@ -756,6 +898,18 @@ is_system_idle() {
         return 1  # Host process is blocking sleep
     fi
 
+    # Check 9: Host blocking systemd units (e.g., apt-daily.service)
+    if check_host_blocking_units; then
+        debug "Host blocking units active"
+        return 1  # Systemd unit is blocking sleep
+    fi
+
+    # Check 10: Systemd sleep inhibitors (applications blocking sleep)
+    if check_sleep_inhibitors; then
+        debug "Sleep inhibitors active"
+        return 1  # Sleep inhibitor is active
+    fi
+
     debug "System appears idle"
     return 0  # System is idle
 }
@@ -923,6 +1077,28 @@ check_once() {
         echo "DISABLED"
     elif check_host_blocking_processes; then
         echo "DETECTED"
+    else
+        echo "none"
+    fi
+
+    echo ""
+    echo -n "Host Blocking Units: "
+    if [[ -z "$HOST_BLOCKING_UNITS" ]]; then
+        echo "DISABLED"
+    elif check_host_blocking_units; then
+        echo "ACTIVE"
+        echo "  $(get_active_blocking_units)"
+    else
+        echo "none"
+    fi
+
+    echo ""
+    echo -n "Sleep Inhibitors: "
+    if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then
+        echo "DISABLED"
+    elif check_sleep_inhibitors; then
+        echo "ACTIVE"
+        get_sleep_inhibitors_detail | sed 's/^/  /'
     else
         echo "none"
     fi
