@@ -41,6 +41,9 @@ gpg --armor --export-secret-keys YOUR_KEY_ID > proxmox-sleep-signing-key.asc
 4. Name: `GPG_PRIVATE_KEY`
 5. Value: Paste the entire contents of `proxmox-sleep-signing-key.asc`
 6. Click **Add secret**
+7. Add another secret:
+   - Name: `GPG_PASSPHRASE`
+   - Value: The passphrase you set when creating the key (or leave empty if no passphrase)
 
 ### 4. Create the gh-pages Branch
 
@@ -140,8 +143,9 @@ echo "test" | gpg --armor --sign
 
 ### Package Signing Failures
 
-- Ensure the GPG key doesn't have a passphrase, or use `--batch --passphrase ""` options
-- Check that `dpkg-sig` and `rpm` are installed in the workflow
+- Ensure `GPG_PASSPHRASE` secret is set (can be empty string if key has no passphrase)
+- Check workflow logs for GPG-related errors
+- Verify the key was exported correctly with `gpg --armor --export-secret-keys`
 
 ### GitHub Pages Not Updating
 

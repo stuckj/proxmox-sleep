@@ -218,9 +218,17 @@ get_gpu_usage() {
 get_vm_cpu_usage() {
     # Use pvesh to get VM status which includes CPU
     local cpu json node_name
-    node_name=$(hostname 2>/dev/null)
+
+    # Get node name from Proxmox directory (more reliable than hostname which may return FQDN)
+    if [[ -d /etc/pve/nodes ]]; then
+        node_name=$(ls -1 /etc/pve/nodes 2>/dev/null | head -n1)
+    fi
     if [[ -z "$node_name" ]]; then
-        debug "Failed to get hostname"
+        # Fallback to hostname
+        node_name=$(hostname -s 2>/dev/null || hostname 2>/dev/null)
+    fi
+    if [[ -z "$node_name" ]]; then
+        debug "Failed to get Proxmox node name"
         echo "-1"
         return
     fi
@@ -538,7 +546,8 @@ check_host_blocking_processes() {
         [[ -z "$proc" ]] && continue
 
         # Check if process is running using pgrep
-        if pgrep -x "$proc" > /dev/null 2>&1; then
+        # Note: Don't use -x (exact match) because kernel truncates process names to 15 chars
+        if pgrep "$proc" > /dev/null 2>&1; then
             debug "Found host blocking process: $proc"
             return 0  # Blocking process found
         fi
