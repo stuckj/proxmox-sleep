@@ -1,14 +1,14 @@
 Package: proxmox-sleep
-Version: 0.9.5
+Version: 0.9.6
 Architecture: all
 Maintainer: stuckj <stuckj@users.noreply.github.com>
-Installed-Size: 64
+Installed-Size: 65
 Recommends: logrotate
-Filename: pool/main/proxmox-sleep_0.9.5_all.deb
-Size: 21502
-MD5sum: e34d9620ea0180a9d5757640e1d97405
-SHA1: 31ede545dd9ca7e3342e1c4642ca76f230000c25
-SHA256: 26186635056f67a1f7f76402607ecc6ac13537e5106a2a310eca6073eb3c183f
+Filename: pool/main/proxmox-sleep_0.9.6_all.deb
+Size: 21698
+MD5sum: ac1f8bc2d74254550ed6afb82a1be2d4
+SHA1: f1540346e096ecbd1a36b8916c43980c97be5f39
+SHA256: bd7e6a6d27304b1a4b8044b1b5f19118c4cd558b41b53c056a4d3fa18b28e5c8
 Section: admin
 Priority: optional
 Homepage: https://github.com/stuckj/proxmox-sleep
