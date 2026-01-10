@@ -57,9 +57,11 @@ HOST_BLOCKING_PROCESSES="unattended-upgrade"
 
 # Host Blocking Systemd Units
 # Comma-separated list of systemd unit names that prevent sleep while active.
-# This is useful for blocking sleep during apt updates, package upgrades, etc.
+# Only include "oneshot" services that run temporarily during actual work.
+# Don't include long-running daemons like unattended-upgrades.service here
+# (use HOST_BLOCKING_PROCESSES for those instead).
 # Set to empty string to disable systemd unit detection
-HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service,unattended-upgrades.service"
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
 
 # Sleep Inhibitor Detection
 # Check for systemd sleep inhibitors (applications that have registered to block sleep)

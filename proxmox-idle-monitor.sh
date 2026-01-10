@@ -34,8 +34,10 @@ GAMING_PROCESSES="${GAMING_PROCESSES-steam.exe,EpicGamesLauncher.exe,GalaxyClien
 HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES-}"
 
 # Systemd units that should block sleep while active (comma-separated)
+# Only include "oneshot" services that run temporarily during actual work.
+# Don't include long-running daemons like unattended-upgrades.service (use HOST_BLOCKING_PROCESSES instead)
 # Set to empty string in config to disable unit detection
-HOST_BLOCKING_UNITS="${HOST_BLOCKING_UNITS-apt-daily.service,apt-daily-upgrade.service,unattended-upgrades.service}"
+HOST_BLOCKING_UNITS="${HOST_BLOCKING_UNITS-apt-daily.service,apt-daily-upgrade.service}"
 
 # Check for systemd sleep inhibitors (applications blocking sleep)
 # Set to 0 to disable sleep inhibitor detection
