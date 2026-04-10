@@ -851,13 +851,41 @@ get_effective_idle_time() {
 is_system_idle() {
     debug "Checking if system is idle..."
 
-    # Check 1: Is VM running at all?
+    # Host-level checks (always run, regardless of VM state)
+
+    # Check 1: SSH sessions to host
+    if [[ "$CHECK_SSH_SESSIONS" == "1" ]] && has_active_ssh_sessions; then
+        debug "Active SSH sessions detected"
+        return 1  # Someone is connected
+    fi
+
+    # Check 2: Host blocking processes (e.g., unattended-upgrade)
+    if check_host_blocking_processes; then
+        debug "Host blocking processes running"
+        return 1  # Host process is blocking sleep
+    fi
+
+    # Check 3: Host blocking systemd units (e.g., apt-daily.service)
+    if check_host_blocking_units; then
+        debug "Host blocking units active"
+        return 1  # Systemd unit is blocking sleep
+    fi
+
+    # Check 4: Systemd sleep inhibitors (applications blocking sleep)
+    if check_sleep_inhibitors; then
+        debug "Sleep inhibitors active"
+        return 1  # Sleep inhibitor is active
+    fi
+
+    # VM-level checks (only when VM is running)
+
+    # Check 5: Is VM running at all?
     if ! vm_is_running; then
         debug "VM not running - considering idle"
         return 0  # VM not running = idle
     fi
 
-    # Check 2: GPU usage (if available)
+    # Check 6: GPU usage (if available)
     local gpu_usage
     gpu_usage=$(get_gpu_usage)
     debug "GPU usage: $gpu_usage%"
@@ -866,7 +894,7 @@ is_system_idle() {
         return 1  # GPU is active
     fi
 
-    # Check 3: VM CPU usage
+    # Check 7: VM CPU usage
     local cpu_usage
     cpu_usage=$(get_vm_cpu_usage)
     debug "VM CPU usage: $cpu_usage%"
@@ -875,13 +903,7 @@ is_system_idle() {
         return 1  # CPU is active
     fi
 
-    # Check 4: SSH sessions to host
-    if [[ "$CHECK_SSH_SESSIONS" == "1" ]] && has_active_ssh_sessions; then
-        debug "Active SSH sessions detected"
-        return 1  # Someone is connected
-    fi
-
-    # Check 5: Effective idle time (accounts for wake time)
+    # Check 8: Effective idle time (accounts for wake time)
     local effective_idle
     effective_idle=$(get_effective_idle_time)
     debug "Effective idle time: ${effective_idle}s"
@@ -891,34 +913,16 @@ is_system_idle() {
         return 1  # User recently active
     fi
 
-    # Check 6: Gaming processes (optional extra check)
+    # Check 9: Gaming processes (optional extra check)
     if check_gaming_processes; then
         debug "Gaming processes detected"
         return 1  # Gaming in progress
     fi
 
-    # Check 7: Windows power requests (media players, downloads, etc.)
+    # Check 10: Windows power requests (media players, downloads, etc.)
     if check_power_requests; then
         debug "Windows power requests active"
         return 1  # Something is keeping Windows awake
-    fi
-
-    # Check 8: Host blocking processes (e.g., unattended-upgrade)
-    if check_host_blocking_processes; then
-        debug "Host blocking processes running"
-        return 1  # Host process is blocking sleep
-    fi
-
-    # Check 9: Host blocking systemd units (e.g., apt-daily.service)
-    if check_host_blocking_units; then
-        debug "Host blocking units active"
-        return 1  # Systemd unit is blocking sleep
-    fi
-
-    # Check 10: Systemd sleep inhibitors (applications blocking sleep)
-    if check_sleep_inhibitors; then
-        debug "Sleep inhibitors active"
-        return 1  # Sleep inhibitor is active
     fi
 
     debug "System appears idle"
