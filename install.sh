@@ -37,8 +37,8 @@ if [[ -f /etc/proxmox-sleep.conf ]]; then
 fi
 
 # Get VM ID (optional — leave blank to skip)
-read -p "Enter your Windows VM ID (leave blank to skip) [100]: " vmid
-VMID=${vmid:-100}
+read -rp "Enter your Windows VM ID (leave blank to skip): " vmid
+VMID=${vmid:-}
 
 VM_NAME=""
 if [[ -n "$VMID" ]] && qm status "$VMID" &>/dev/null; then
@@ -132,7 +132,16 @@ if [[ ! -f /etc/proxmox-sleep.conf ]]; then
         ESCAPED_VMID=$(escape_sed "$VMID")
         ESCAPED_VM_NAME=$(escape_sed "$VM_NAME")
         sed -i "s/^VM_IDS=.*/VM_IDS=\"$ESCAPED_VMID\"/" /etc/proxmox-sleep.conf
-        sed -i "s/^VM_100_NAME=.*/VM_${ESCAPED_VMID}_NAME=\"$ESCAPED_VM_NAME\"/" /etc/proxmox-sleep.conf
+        # Re-key the entire VM_100_* block to VM_<VMID>_* so all per-instance
+        # settings (MONITOR, SLEEP_ACTION, GAMING_PROCESSES, etc.) apply.
+        if [[ "$ESCAPED_VMID" != "100" ]]; then
+            sed -i "s/^VM_100_/VM_${ESCAPED_VMID}_/" /etc/proxmox-sleep.conf
+        fi
+        sed -i "s/^VM_${ESCAPED_VMID}_NAME=.*/VM_${ESCAPED_VMID}_NAME=\"$ESCAPED_VM_NAME\"/" /etc/proxmox-sleep.conf
+    else
+        # No VM configured — blank out the default VM_IDS so the idle monitor
+        # doesn't try to validate a VM that isn't there.
+        sed -i 's/^VM_IDS=.*/VM_IDS=""/' /etc/proxmox-sleep.conf
     fi
 
     if [[ -n "$CTID" ]]; then

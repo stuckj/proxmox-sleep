@@ -82,8 +82,14 @@ guest_agent_ready() {
 # --- State file helpers -----------------------------------------------------
 
 state_set() {
-    # key=value into state file (appends, file is truncated at start of pre_sleep)
+    # Upsert key=value into state file. Removes any prior entry for the same
+    # key before appending the new value, so each instance has exactly one
+    # final state record even if multiple code paths write during pre_sleep
+    # (e.g., hibernate_vm writes "hibernated" then "was_shutdown" on timeout).
     local key="$1" value="$2"
+    if [[ -f "$STATE_FILE" ]]; then
+        sed -i "/^${key}=/d" "$STATE_FILE"
+    fi
     echo "${key}=${value}" >> "$STATE_FILE"
 }
 
@@ -153,7 +159,6 @@ hibernate_vm() {
 
     log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s for VM $id; forcing shutdown"
     qm shutdown "$id" --timeout 60
-    # overwrite prior hibernated entry (we can't easily; just append — post_wake tolerates either value)
     state_set "vm_${id}" "was_shutdown"
     return 1
 }
@@ -331,8 +336,13 @@ pre_sleep() {
     done
 
     log "=== PRE-SLEEP HOOK COMPLETE (exit: $overall_rc) ==="
-    # Don't block host sleep even if some instance failed — matches prior behavior.
-    return 0
+    # Default: return 0 so a failed instance doesn't abort systemd's sleep
+    # transition (matches prior behavior). Manual callers can set
+    # PRE_SLEEP_NONBLOCKING=0 to receive the aggregated result.
+    if [[ "${PRE_SLEEP_NONBLOCKING:-1}" == "1" ]]; then
+        return 0
+    fi
+    return "$overall_rc"
 }
 
 post_wake() {
@@ -407,9 +417,10 @@ post_wake() {
 
 # --- Manual/status commands -------------------------------------------------
 
-# Hibernate (or shut down per config) every configured instance without sleeping the host
+# Hibernate (or shut down per config) every configured instance without sleeping the host.
+# Uses PRE_SLEEP_NONBLOCKING=0 so the caller receives the aggregated exit code.
 hibernate_all() {
-    pre_sleep
+    PRE_SLEEP_NONBLOCKING=0 pre_sleep
 }
 
 # Resume every instance per current state file

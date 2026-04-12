@@ -324,7 +324,8 @@ check_vm_gaming_processes() {
         proc=$(echo "$proc" | xargs)
         [[ -z "$proc" ]] && continue
         local proc_name="${proc%.exe}"
-        if echo "$processes" | grep -qi "$proc_name"; then
+        # -F = fixed-string match: "Battle.net" etc. contain regex metachars.
+        if echo "$processes" | grep -Fqi -- "$proc_name"; then
             debug "Found gaming process in VM $id: $proc"
             return 0
         fi
@@ -411,7 +412,7 @@ check_ct_gaming_processes() {
     for proc in "${gaming_procs[@]}"; do
         proc=$(echo "$proc" | xargs)
         [[ -z "$proc" ]] && continue
-        if echo "$processes" | grep -qi "$proc"; then
+        if echo "$processes" | grep -Fqi -- "$proc"; then
             debug "Found gaming process in container $id: $proc"
             return 0
         fi
@@ -752,7 +753,12 @@ trigger_sleep() {
 install_windows_idle_helper() {
     local id="${1:-}"
     if [[ -z "$id" ]]; then
-        if [[ $(echo "$VM_IDS" | wc -w) -eq 1 ]]; then
+        local vm_count; vm_count=$(echo "$VM_IDS" | wc -w)
+        if [[ "$vm_count" -eq 0 ]]; then
+            echo "No VMs configured. Set VM_IDS in $CONFIG_FILE or pass a VMID argument:" >&2
+            echo "  $0 install-helper <VMID>" >&2
+            exit 1
+        elif [[ "$vm_count" -eq 1 ]]; then
             id="$VM_IDS"
         else
             echo "Multiple VMs configured. Specify which VM ID:" >&2
@@ -853,7 +859,12 @@ objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "
 uninstall_windows_idle_helper() {
     local id="${1:-}"
     if [[ -z "$id" ]]; then
-        if [[ $(echo "$VM_IDS" | wc -w) -eq 1 ]]; then
+        local vm_count; vm_count=$(echo "$VM_IDS" | wc -w)
+        if [[ "$vm_count" -eq 0 ]]; then
+            echo "No VMs configured. Set VM_IDS in $CONFIG_FILE or pass a VMID argument:" >&2
+            echo "  $0 uninstall-helper <VMID>" >&2
+            exit 1
+        elif [[ "$vm_count" -eq 1 ]]; then
             id="$VM_IDS"
         else
             echo "Multiple VMs configured. Specify which VM ID:" >&2
