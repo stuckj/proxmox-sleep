@@ -1,79 +1,143 @@
 # Proxmox Sleep Manager Configuration
-# Copy this file to /etc/proxmox-sleep.conf and customize
+# Copy this file to /etc/proxmox-sleep.conf and customize.
+#
+# Supports multiple VMs and LXC containers.  Each instance is configured
+# independently — the system only sleeps when *all* monitored instances
+# are idle AND host-level checks pass.
+#
+# Backward compatibility: if you set only VMID= (and no VM_IDS / CONTAINER_IDS),
+# the scripts treat it as a single Windows VM with legacy defaults.
 
-# VM Configuration
-# The Proxmox VM ID of your Windows VM
-VMID=100
+###############################################################################
+# Global settings
+###############################################################################
 
-# VM name (used for logging only)
-VM_NAME="windows"
-
-# Idle Monitor Settings
 # Minutes of idle time before auto-sleep (0 to disable auto-sleep)
 IDLE_THRESHOLD_MINUTES=15
 
 # Check interval in seconds
 CHECK_INTERVAL=60
 
-# CPU usage threshold (percentage) - VM is "active" if above this
+# CPU usage threshold (percentage) — instance CPU above this = active
+# Can be overridden per instance (VM_<id>_CPU_IDLE_THRESHOLD, etc.)
 CPU_IDLE_THRESHOLD=15
 
-# GPU usage threshold (percentage) - VM is "active" if above this
+# GPU usage threshold (percentage) — GPU above this = active
 GPU_IDLE_THRESHOLD=10
 
-# GPU vendor in the Windows VM: "nvidia", "amd", or "auto"
-# "auto" will try nvidia first, then amd, then Windows performance counters
+# GPU vendor for Windows VM (nvidia, amd, or auto)
+# Only affects in-VM GPU queries — host-side nvidia-smi for containers is
+# always used when available.
 GPU_VENDOR=auto
 
 # Check for active SSH sessions on the host (1=enabled, 0=disabled)
-# Disable this for debugging so you can SSH in without preventing sleep
 CHECK_SSH_SESSIONS=1
 
-# Hibernation Settings
-# Maximum seconds to wait for Windows to hibernate
+# Maximum seconds to wait for a Windows VM to hibernate
 HIBERNATE_TIMEOUT=300
 
-# Seconds to wait after host wake before starting VM
+# Maximum seconds to wait for a VM shutdown or container shutdown
+SHUTDOWN_TIMEOUT=120
+
+# Seconds to wait after host wake before starting instances
 WAKE_DELAY=5
 
-# Grace period after wake (seconds) - prevent immediate re-sleep after waking
-# This is a safety net to ensure the system has time to stabilize before
-# the idle monitor can trigger another sleep cycle
+# Grace period after wake — prevent immediate re-sleep
 WAKE_GRACE_PERIOD=60
 
-# Gaming Process Detection
-# Comma-separated list of process names (in Windows VM) that indicate gaming activity
-# The system won't auto-sleep if any of these are running
-# Set to empty string to disable gaming process detection
-GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
-
-# Host Blocking Process Detection
-# Comma-separated list of process names on the Proxmox HOST that prevent sleep
-# when actively running. Use this for maintenance tasks like updates.
-# Note: This checks for running PROCESSES, not services - the unattended-upgrade
-# service runs continuously but only spawns the unattended-upgrade process during updates.
-# Set to empty string to disable host process detection
+# Host processes that prevent sleep when running (comma-separated)
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
 
-# Host Blocking Systemd Units
-# Comma-separated list of systemd unit names that prevent sleep while active.
-# Only include "oneshot" services that run temporarily during actual work.
-# Don't include long-running daemons like unattended-upgrades.service here
-# (use HOST_BLOCKING_PROCESSES for those instead).
-# Set to empty string to disable systemd unit detection
+# Systemd units that prevent sleep while active (comma-separated, oneshot only)
 HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
 
-# Sleep Inhibitor Detection
-# Check for systemd sleep inhibitors (applications that have registered to block sleep)
-# Examples: media players, file transfers, presentations, etc.
-# Only inhibitors that block or delay "sleep" are considered.
-# Set to 0 to disable sleep inhibitor detection
+# Check for systemd sleep inhibitors (1=on, 0=off)
 CHECK_SLEEP_INHIBITORS=1
 
 # Logging
-# Log file locations
 SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
 IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
 
 # Enable debug logging (1=enabled, 0=disabled)
 DEBUG=0
+
+###############################################################################
+# Instance lists  (space-separated Proxmox IDs)
+###############################################################################
+
+# VMs to manage
+VM_IDS="100"
+
+# LXC containers to manage
+CONTAINER_IDS=""
+
+###############################################################################
+# Per-VM settings     (VM_<id>_<SETTING>)
+###############################################################################
+
+# VM 100 — Windows gaming VM
+VM_100_NAME="windows-gaming"
+
+# Participate in idle detection? (1=yes, 0=no)
+VM_100_MONITOR=1
+
+# What to do with this VM when host sleeps:
+#   hibernate    — send 'shutdown /h' via guest agent (Windows only)
+#   shutdown     — graceful shutdown via 'qm shutdown'
+#   keep_running — leave running through host sleep
+#   ignore       — don't touch this VM at all
+VM_100_SLEEP_ACTION=hibernate
+
+# Start this VM again after host wakes? (1=yes, 0=no)
+# Only applies when the VM was stopped BY the sleep command.
+VM_100_RESUME_ON_WAKE=1
+
+# Gaming processes — prevent sleep when any of these are running in the VM.
+# Comma-separated, matched case-insensitively.  Set to "" to disable.
+VM_100_GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
+
+# Check Windows power requests via powercfg /requests (1=on, 0=off)
+VM_100_CHECK_POWER_REQUESTS=1
+
+# Check Windows user idle time via the idle helper (1=on, 0=off)
+VM_100_CHECK_USER_IDLE=1
+
+# Optional per-instance overrides (uncomment to set):
+# VM_100_CPU_IDLE_THRESHOLD=15
+# VM_100_GPU_IDLE_THRESHOLD=10
+
+###############################################################################
+# Per-container settings     (CONTAINER_<id>_<SETTING>)
+###############################################################################
+
+# Uncomment and adjust to add a container:
+#
+# CONTAINER_200_NAME="steam-linux"
+#
+# CONTAINER_200_MONITOR=1
+#
+# What to do when host sleeps:
+#   shutdown     — graceful shutdown via 'pct shutdown'
+#   keep_running — leave running
+#   ignore       — don't touch
+# (hibernate is NOT supported for LXC — it will be treated as shutdown)
+# CONTAINER_200_SLEEP_ACTION=shutdown
+#
+# CONTAINER_200_RESUME_ON_WAKE=1
+#
+# Gaming processes in the container (Linux names, comma-separated).
+# Checked via 'pct exec <id> -- ps -eo comm='.
+# CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,proton,gamescope"
+#
+# Optional per-instance overrides:
+# CONTAINER_200_CPU_IDLE_THRESHOLD=15
+# CONTAINER_200_GPU_IDLE_THRESHOLD=10
+
+###############################################################################
+# Legacy single-VM format (backward compatible)
+###############################################################################
+# If VM_IDS and CONTAINER_IDS are both empty, these are used instead:
+#
+# VMID=100
+# VM_NAME="windows"
+# GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"

@@ -7,6 +7,7 @@ This document provides a comprehensive technical overview of the Proxmox Sleep M
 - [Problem Statement](#problem-statement)
 - [Solution Overview](#solution-overview)
 - [Architecture](#architecture)
+- [Instance Iteration Model](#instance-iteration-model)
 - [Component Details](#component-details)
 - [Data Flow](#data-flow)
 - [State Management](#state-management)
@@ -21,7 +22,7 @@ This document provides a comprehensive technical overview of the Proxmox Sleep M
 
 ### The Challenge
 
-Running Windows VMs with GPU passthrough on Proxmox hosts presents a significant power management challenge:
+Running Windows VMs and Linux containers with GPU passthrough on Proxmox hosts presents a significant power management challenge:
 
 1. **Native S3 Sleep Limitations**: Hardware sleep (S3/S2idle) with GPU passthrough is unreliable because:
    - GPUs often lack proper Function Level Reset (FLR) support
@@ -30,7 +31,7 @@ Running Windows VMs with GPU passthrough on Proxmox hosts presents a significant
 
 2. **Power Consumption**: Leaving a powerful workstation running 24/7 wastes significant electricity when not in use.
 
-3. **User Experience**: Users want their Windows VM to "just work" when they return, similar to a laptop waking from sleep.
+3. **User Experience**: Users want their VMs and containers to "just work" when they return, similar to a laptop waking from sleep.
 
 ### Why Existing Solutions Fall Short
 
@@ -45,26 +46,18 @@ Running Windows VMs with GPU passthrough on Proxmox hosts presents a significant
 
 ### Core Approach
 
-Use **Windows hibernation** as a VM state preservation mechanism, decoupled from host sleep:
+Use **Windows hibernation** for VMs and **graceful shutdown** for LXC containers as state preservation mechanisms, decoupled from host sleep:
 
-1. **Before host sleep**: Hibernate the Windows VM (saves RAM to disk, releases all hardware)
-2. **Host sleeps**: With no VMs running, host enters safe S3/S2idle state
-3. **Host wakes**: Start the VM, which automatically resumes from hibernation
-
-### Key Innovation
-
-By using Windows' own hibernation instead of QEMU's savestate:
-- GPU is properly released (Windows shuts down, QEMU exits)
-- VM state is safely persisted (hiberfil.sys on Windows disk)
-- Resume is handled by Windows (native, reliable)
-- Host can safely enter deep sleep states
+1. **Before host sleep**: Hibernate Windows VMs (saves RAM to disk, releases all hardware) and shut down LXC containers
+2. **Host sleeps**: With no VMs/containers running, host enters safe S3/S2idle state
+3. **Host wakes**: Start VMs (which resume from hibernation) and start containers
 
 ### Two-Component Design
 
 | Component | Role | Execution Model |
 |-----------|------|-----------------|
-| **Sleep Manager** | Orchestrates VM hibernation/resume around host sleep | Systemd hook (oneshot) |
-| **Idle Monitor** | Detects inactivity and triggers host sleep | Systemd daemon (long-running) |
+| **Sleep Manager** | Orchestrates VM hibernation/shutdown and container shutdown/resume around host sleep | Systemd hook (oneshot) |
+| **Idle Monitor** | Detects inactivity across all instances and triggers host sleep | Systemd daemon (long-running) |
 
 ---
 
@@ -86,88 +79,82 @@ By using Windows' own hibernation instead of QEMU's savestate:
 │  │             ▼                               ▼                       │   │
 │  │  ┌─────────────────────┐    ┌──────────────────────────────────┐   │   │
 │  │  │ proxmox-sleep-      │    │ proxmox-idle-monitor.sh          │   │   │
-│  │  │ manager.service     │    │ (Polls every 60s)                │   │   │
+│  │  │ manager.service     │    │ (Polls every CHECK_INTERVAL)     │   │   │
 │  │  │ (Type=oneshot)      │    │                                  │   │   │
 │  │  └──────────┬──────────┘    └───────────────┬──────────────────┘   │   │
 │  └─────────────┼───────────────────────────────┼───────────────────────┘   │
 │                │                               │                           │
-│                ▼                               ▼                           │
-│  ┌─────────────────────────┐    ┌──────────────────────────────────────┐   │
-│  │ proxmox-sleep-manager.sh│    │         Activity Checks              │   │
-│  │                         │    │  ┌────────────┐ ┌──────────────┐     │   │
-│  │  • pre_sleep()          │    │  │ VM CPU %   │ │ GPU Usage    │     │   │
-│  │  • post_wake()          │    │  └────────────┘ └──────────────┘     │   │
-│  │  • hibernate_vm()       │    │  ┌────────────┐ ┌──────────────┐     │   │
-│  │  • resume_vm()          │    │  │ User Idle  │ │ Power Reqs   │     │   │
-│  └───────────┬─────────────┘    │  └────────────┘ └──────────────┘     │   │
-│              │                  │  ┌────────────┐ ┌──────────────┐     │   │
-│              ▼                  │  │ Gaming     │ │ SSH Sessions │     │   │
-│  ┌─────────────────────────┐    │  └────────────┘ └──────────────┘     │   │
-│  │    Proxmox API (pvesh)  │    │  ┌────────────┐ ┌──────────────┐     │   │
-│  │    VM Control (qm)      │    │  │ Host Procs │ │ Inhibitors   │     │   │
-│  └───────────┬─────────────┘    │  └────────────┘ └──────────────┘     │   │
-│              │                  └───────────────┬──────────────────────┘   │
-│              ▼                                  │                          │
-│  ┌─────────────────────────────────────────────┼────────────────────────┐  │
-│  │                    Windows VM (QEMU/KVM)    │                        │  │
-│  │                                             ▼                        │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │  │
-│  │  │ QEMU Guest   │  │ GPU (passed  │  │ Idle Helper (Scheduled   │   │  │
-│  │  │ Agent        │  │ through)     │  │ Task)                    │   │  │
-│  │  │              │  │              │  │                          │   │  │
-│  │  │ Receives:    │  │ nvidia-smi   │  │ • Tracks KB/Mouse idle   │   │  │
-│  │  │ • shutdown   │  │ or AMD perf  │  │ • Writes idle_seconds.txt│   │  │
-│  │  │ • exec cmds  │  │ counters     │  │ • Tray icon display      │   │  │
-│  │  └──────────────┘  └──────────────┘  └──────────────────────────┘   │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
+│      ┌─────────┴─────────┐          ┌──────────┴──────────┐               │
+│      ▼                   ▼          ▼                     ▼               │
+│  ┌────────────┐   ┌────────────┐  ┌──────────────┐  ┌──────────────┐    │
+│  │ VM Control │   │ CT Control │  │ VM Activity  │  │ CT Activity  │    │
+│  │ qm start/  │   │ pct start/ │  │ Checks       │  │ Checks       │    │
+│  │ shutdown/  │   │ shutdown/  │  │ (guest agent)│  │ (pct exec)   │    │
+│  │ guest exec │   │ stop       │  │              │  │              │    │
+│  └─────┬──────┘   └─────┬──────┘  └──────┬───────┘  └──────┬───────┘    │
+│        │                │               │                  │             │
+│        ▼                ▼               ▼                  ▼             │
+│  ┌──────────────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │ Windows VM (QEMU)│  │ LXC CT   │  │ Host Activity│  │ Host GPU     │ │
+│  │ • Guest Agent    │  │ • ps     │  │ • SSH, procs │  │ • nvidia-smi │ │
+│  │ • Idle Helper    │  │ • gaming │  │ • units      │  │ (for CTs)    │ │
+│  │ • GPU (in-guest) │  │          │  │ • inhibitors │  │              │ │
+│  └──────────────────┘  └──────────┘  └──────────────┘  └──────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Component Interaction Sequence
+---
+
+## Instance Iteration Model
+
+The system manages an arbitrary number of VMs and LXC containers, each configured independently.
+
+### Configuration
+
+Instances are declared via two space-separated ID lists:
+
+```bash
+VM_IDS="100 101"
+CONTAINER_IDS="200 201"
+```
+
+Per-instance settings use the naming convention `VM_<id>_<SETTING>` or `CONTAINER_<id>_<SETTING>` and are read via bash indirect expansion (`${!var}`).
+
+### Legacy Compatibility
+
+If neither `VM_IDS` nor `CONTAINER_IDS` is set but the old `VMID=` variable is present, a **legacy shim** function (`hydrate_legacy_config`) synthesizes a single VM entry at startup. This means existing configs from before container support was added continue to work without modification.
+
+### Sleep Decision
+
+The host sleeps only when **all** of the following are true:
+1. All host-level checks pass (SSH, blocking processes, systemd units, sleep inhibitors)
+2. Every monitored VM is idle (or not running)
+3. Every monitored container is idle (or not running)
+
+### Pre-Sleep Actions
+
+Each instance has a configurable `SLEEP_ACTION`:
+
+| Action | VMs | Containers | Behavior |
+|--------|-----|------------|----------|
+| `hibernate` | Yes | No* | Send `shutdown /h` via QEMU guest agent |
+| `shutdown` | Yes | Yes | `qm shutdown` / `pct shutdown` with timeout, force-stop on failure |
+| `keep_running` | Yes | Yes | Leave running, record state only |
+| `ignore` | Yes | Yes | Don't touch at all |
+
+\* If `hibernate` is set for a container it is treated as `shutdown` with a warning.
+
+### State File
+
+Pre-sleep records one line per instance in `/tmp/proxmox-sleep-manager.state`:
 
 ```
-┌──────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────┐
-│  User    │     │Idle Monitor  │     │Sleep Manager │     │Windows VM│
-└────┬─────┘     └──────┬───────┘     └──────┬───────┘     └────┬─────┘
-     │                  │                    │                  │
-     │  Leaves system   │                    │                  │
-     │─ ─ ─ ─ ─ ─ ─ ─ ─>│                    │                  │
-     │                  │                    │                  │
-     │                  │ Poll activity (60s intervals)        │
-     │                  │─────────────────────────────────────>│
-     │                  │<─────────────────────────────────────│
-     │                  │ (All checks: IDLE)                   │
-     │                  │                    │                  │
-     │                  │ (15 min threshold reached)           │
-     │                  │                    │                  │
-     │                  │ systemctl suspend  │                  │
-     │                  │───────────────────>│                  │
-     │                  │                    │                  │
-     │                  │                    │ pre_sleep()      │
-     │                  │                    │─────────────────>│
-     │                  │                    │ shutdown /h      │
-     │                  │                    │<─────────────────│
-     │                  │                    │ (VM hibernates)  │
-     │                  │                    │                  │
-     │                  │                    │ (Host enters S3) │
-     │                  │                    │                  │
-     ═══════════════════════════════════════════════════════════
-     │                  │                    │                  │
-     │  Returns/WoL     │                    │                  │
-     │─ ─ ─ ─ ─ ─ ─ ─ ─>│                    │                  │
-     │                  │                    │                  │
-     │                  │                    │ post_wake()      │
-     │                  │                    │─────────────────>│
-     │                  │                    │ qm start         │
-     │                  │                    │<─────────────────│
-     │                  │                    │ (VM resumes)     │
-     │                  │                    │                  │
-     │                  │ Grace period (60s) │                  │
-     │                  │<───────────────────│                  │
-     │                  │                    │                  │
-     │                  │ Resume monitoring  │                  │
-     │                  │─────────────────────────────────────>│
+vm_100=hibernated
+ct_200=shutdown
+vm_101=not_running
 ```
+
+Post-wake reads the file and starts any instance whose state is `hibernated`, `shutdown`, or `was_shutdown` — but only if its `RESUME_ON_WAKE=1`. Instances with `not_running`, `kept_running`, or `ignored` are left as-is.
 
 ---
 
@@ -175,19 +162,20 @@ By using Windows' own hibernation instead of QEMU's savestate:
 
 ### Sleep Manager (`proxmox-sleep-manager.sh`)
 
-**Purpose**: Orchestrate VM hibernation when host sleeps, and VM resume when host wakes.
+**Purpose**: Orchestrate VM hibernation, VM/container shutdown, and resume around host sleep.
 
 **Execution Context**: Runs as a systemd oneshot service, triggered by sleep.target.
 
 #### Key Functions
 
-| Function | Trigger | Description |
-|----------|---------|-------------|
-| `pre_sleep()` | `ExecStart` (Before sleep.target) | Hibernates VM, waits for completion |
-| `post_wake()` | `ExecStop` (After wake) | Resumes VM from hibernation |
-| `hibernate_vm()` | Called by pre_sleep | Sends `shutdown /h` via guest agent |
-| `resume_vm()` | Called by post_wake | Issues `qm start` |
-| `wait_for_hibernation()` | Called by hibernate_vm | Polls until QEMU exits |
+| Function | Description |
+|----------|-------------|
+| `pre_sleep()` | Iterates `VM_IDS` and `CONTAINER_IDS`, executes per-instance sleep action |
+| `post_wake()` | Reads state file, resumes instances where appropriate |
+| `hibernate_vm(id)` | Send `shutdown /h` via guest agent, poll until stopped |
+| `shutdown_vm(id)` | `qm shutdown` with timeout, force-stop fallback |
+| `shutdown_ct(id)` | `pct shutdown` with timeout, `pct stop` fallback |
+| `resume_instance(kind, id)` | `qm start` or `pct start` with race-condition handling |
 
 #### Systemd Service Configuration
 
@@ -207,42 +195,6 @@ ExecStop=/usr/local/bin/proxmox-sleep-manager.sh post-wake
 WantedBy=sleep.target
 ```
 
-**Design Rationale**:
-- `Before=sleep.target`: Ensures VM hibernates before host sleeps
-- `RemainAfterExit=yes`: Keeps unit "active" so ExecStop runs on wake
-- `StopWhenUnneeded=yes`: Triggers ExecStop when sleep.target deactivates
-
-#### Hibernation Sequence Detail
-
-```
-pre_sleep()
-    │
-    ├─ Check VM exists (qm status)
-    │   └─ Exit if VM doesn't exist
-    │
-    ├─ Check VM is running
-    │   └─ Exit success if already stopped (nothing to hibernate)
-    │
-    ├─ Verify guest agent responds (timeout 10s)
-    │   └─ Log warning if unresponsive, attempt anyway
-    │
-    ├─ Send hibernation command
-    │   │   qm guest exec $VMID -- powershell -Command "shutdown /h"
-    │   │
-    │   └─ Alternative: qm guest cmd $VMID shutdown --mode hibernate
-    │
-    ├─ Wait for hibernation (poll every 5s, max HIBERNATE_TIMEOUT)
-    │   │
-    │   ├─ Check VM status via qm status
-    │   ├─ Check QEMU process via pgrep
-    │   └─ Require 2 consecutive "stopped" readings
-    │
-    ├─ Record state to /tmp/proxmox-sleep-manager.state
-    │   └─ Contains: "hibernated" or "was_stopped"
-    │
-    └─ Return success (allow host to sleep)
-```
-
 ### Idle Monitor (`proxmox-idle-monitor.sh`)
 
 **Purpose**: Continuously monitor system activity and trigger host sleep when idle threshold is reached.
@@ -251,94 +203,34 @@ pre_sleep()
 
 #### Idle Detection Hierarchy
 
-The monitor performs multiple activity checks. **All checks must indicate idle** for the system to be considered inactive:
-
 ```
                         ┌─────────────────┐
-                        │  Idle Monitor   │
-                        │   Main Loop     │
+                        │  is_system_idle()│
                         └────────┬────────┘
                                  │
               ┌──────────────────┼──────────────────┐
               │                  │                  │
               ▼                  ▼                  ▼
      ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
-     │ VM-Level       │ │ Windows-Level  │ │ Host-Level     │
-     │ Checks         │ │ Checks         │ │ Checks         │
+     │ Host-Level     │ │ Per-VM Checks  │ │ Per-CT Checks  │
+     │ (always)       │ │ (if monitored  │ │ (if monitored  │
+     │                │ │  and running)  │ │  and running)  │
      └───────┬────────┘ └───────┬────────┘ └───────┬────────┘
              │                  │                  │
-    ┌────────┴────────┐  ┌──────┴──────┐   ┌──────┴──────┐
-    │                 │  │             │   │             │
-    ▼                 ▼  ▼             ▼   ▼             ▼
-┌────────┐      ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
-│VM CPU %│      │GPU %   │ │User    │ │Power   │ │Gaming  │ │SSH     │
-│(pvesh) │      │(nvidia/│ │Idle    │ │Requests│ │Procs   │ │Sessions│
-│        │      │amd)    │ │(helper)│ │        │ │        │ │        │
-└────────┘      └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
-                                │
-                          ┌─────┴─────┐
-                          │           │
-                          ▼           ▼
-                    ┌────────┐  ┌────────────┐
-                    │Host    │  │Systemd     │
-                    │Blocking│  │Inhibitors  │
-                    │Procs   │  │            │
-                    └────────┘  └────────────┘
+    ┌────────┴────┐    ┌───────┴────────┐  ┌──────┴──────┐
+    │ SSH         │    │ VM GPU (guest) │  │ CT GPU (host│
+    │ Host procs  │    │ VM CPU (pvesh) │  │  nvidia-smi)│
+    │ Host units  │    │ User idle time │  │ CT CPU      │
+    │ Inhibitors  │    │ Gaming procs   │  │ Gaming procs│
+    └─────────────┘    │ Power requests │  └─────────────┘
+                       └────────────────┘
 ```
 
-#### Activity Check Details
+#### GPU Check Architecture
 
-| Check | Method | Active If | Default Threshold |
-|-------|--------|-----------|-------------------|
-| VM CPU | `pvesh get /nodes/.../status` | CPU% > threshold | 15% |
-| GPU Usage | `nvidia-smi` or AMD perf counters | GPU% > threshold | 10% |
-| User Idle | Idle helper file or screensaver query | Idle time < threshold | 15 min |
-| Power Requests | `powercfg /requests` via guest agent | Any active request | N/A |
-| Gaming | Process list via guest agent | Gaming process found | steam.exe, etc. |
-| SSH Sessions | `who` or `ss` on host | Any SSH session | N/A |
-| Host Processes | `pgrep` for blocking processes | Process running | unattended-upgrade |
-| Systemd Units | `systemctl is-active` | Unit active | apt-daily.service |
-| Sleep Inhibitors | `systemd-inhibit --list` | Any inhibitor | N/A |
-| Wake Grace | Compare current time to wake file | Within grace period | 60s |
+- **VM GPU**: Queried *inside* the Windows guest via QEMU guest agent (nvidia-smi, AMD perf counters). This is necessary because the host-side GPU driver is replaced by vfio-pci during passthrough — `nvidia-smi` on the host sees no device while the VM is running.
 
-#### Windows Idle Helper
-
-A critical component for accurate idle detection with USB passthrough:
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                     Windows VM                                  │
-│                                                                │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │              Scheduled Task (runs every 10s)              │  │
-│  │                                                          │  │
-│  │  PowerShell Script:                                      │  │
-│  │  1. Call GetLastInputInfo() Win32 API                    │  │
-│  │  2. Calculate seconds since last input                   │  │
-│  │  3. Write to idle_seconds.txt                            │  │
-│  │  4. Update tray icon tooltip                             │  │
-│  └────────────────────────────────┬─────────────────────────┘  │
-│                                   │                            │
-│                                   ▼                            │
-│  ┌────────────────────────────────────────────────────────┐    │
-│  │  C:\ProgramData\proxmox-idle\                          │    │
-│  │  ├── idle_seconds.txt    ← "142" (seconds idle)        │    │
-│  │  ├── check-idle.ps1      ← Idle check script           │    │
-│  │  └── tray-icon.ps1       ← System tray helper          │    │
-│  └────────────────────────────────────────────────────────┘    │
-│                                   │                            │
-└───────────────────────────────────┼────────────────────────────┘
-                                    │
-                                    │ qm guest exec (read file)
-                                    │
-                                    ▼
-                          ┌──────────────────┐
-                          │   Idle Monitor   │
-                          │ (Proxmox Host)   │
-                          └──────────────────┘
-```
-
-**Why a helper is needed**: When USB devices (keyboard/mouse) are passed through to the VM, the host has no visibility into input activity. The helper bridges this gap.
+- **Container GPU**: Queried on the host via `nvidia-smi`. When the GPU is bound to vfio-pci (VM running), `nvidia-smi` returns an error, which is treated as `-1` (no signal, not active) — the correct graceful degradation.
 
 ---
 
@@ -347,69 +239,25 @@ A critical component for accurate idle detection with USB passthrough:
 ### Configuration Loading
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Configuration Sources                     │
-│                                                             │
-│   Priority (highest to lowest):                             │
-│   1. Environment variables (override everything)            │
-│   2. /etc/proxmox-sleep.conf (main config file)            │
-│   3. Built-in defaults (in script)                         │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    load_config()                            │
-│                                                             │
-│   if [ -f "/etc/proxmox-sleep.conf" ]; then                │
-│       # shellcheck source=/dev/null                        │
-│       source "/etc/proxmox-sleep.conf"                     │
-│   fi                                                       │
-│                                                             │
-│   # Environment overrides (already in environment)         │
-│   VMID="${VMID:-100}"                                      │
-│   IDLE_THRESHOLD_MINUTES="${IDLE_THRESHOLD_MINUTES:-15}"   │
-│   ...                                                      │
-└─────────────────────────────────────────────────────────────┘
+Priority (highest to lowest):
+1. Environment variables
+2. /etc/proxmox-sleep.conf (sourced)
+3. Built-in defaults
+
+After sourcing:
+  hydrate_legacy_config() runs — if only VMID= is set,
+  synthesizes VM_IDS and VM_<id>_* variables
 ```
 
 ### Proxmox API Communication
 
 ```
-┌─────────────────┐                    ┌─────────────────┐
-│  Idle Monitor   │                    │   Proxmox API   │
-│  / Sleep Mgr    │                    │    (pvesh)      │
-└────────┬────────┘                    └────────┬────────┘
-         │                                      │
-         │  pvesh get /nodes/{node}/qemu/{vmid}/status/current
-         │─────────────────────────────────────>│
-         │                                      │
-         │  { "status": "running", "cpu": 0.05, ... }
-         │<─────────────────────────────────────│
-         │                                      │
-         │  qm status {vmid}                    │
-         │─────────────────────────────────────>│
-         │                                      │
-         │  "status: running"                   │
-         │<─────────────────────────────────────│
-```
-
-### Guest Agent Communication
-
-```
-┌─────────────────┐                    ┌─────────────────┐
-│   Host Script   │                    │  QEMU Guest     │
-│                 │                    │  Agent (VM)     │
-└────────┬────────┘                    └────────┬────────┘
-         │                                      │
-         │  qm guest exec $VMID -- powershell -Command "..."
-         │─────────────────────────────────────>│
-         │                                      │
-         │  (PowerShell executes in VM)         │
-         │                                      │
-         │  { "out-data": "base64...", "exitcode": 0 }
-         │<─────────────────────────────────────│
-         │                                      │
-         │  (Decode base64, parse result)       │
+Host Script ──> pvesh get /nodes/{node}/qemu/{vmid}/status/current   (VM CPU)
+            ──> pvesh get /nodes/{node}/lxc/{ctid}/status/current    (CT CPU)
+            ──> qm status {vmid}          (VM running check)
+            ──> pct status {ctid}         (CT running check)
+            ──> qm guest exec {vmid} ...  (Windows queries)
+            ──> pct exec {ctid} ...       (Container queries)
 ```
 
 ---
@@ -420,145 +268,86 @@ A critical component for accurate idle detection with USB passthrough:
 
 | File | Purpose | Lifecycle |
 |------|---------|-----------|
-| `/tmp/proxmox-sleep-manager.state` | VM state before sleep | Created pre-sleep, read post-wake, deleted after use |
+| `/tmp/proxmox-sleep-manager.state` | Instance states before sleep (key=value, one per line) | Created pre-sleep, read post-wake, deleted after use |
 | `/tmp/proxmox-idle-monitor.state` | Idle timer start timestamp | Created when idle begins, deleted when active |
 | `/tmp/proxmox-idle-monitor.wake` | Last wake timestamp | Created post-wake, used for grace period |
 
 ### State Transitions
 
 ```
-                        ┌─────────────┐
-                        │   ACTIVE    │
-                        │  (Normal)   │
-                        └──────┬──────┘
-                               │
-                    Activity detected
-                               │
-              ┌────────────────┴────────────────┐
-              │                                 │
-              ▼                                 │
-     ┌─────────────────┐                        │
-     │  IDLE_TRACKING  │                        │
-     │  (Timer active) │                        │
-     │                 │                        │
-     │  state file:    │                        │
-     │  timestamp      │                        │
-     └────────┬────────┘                        │
-              │                                 │
-    Threshold reached                 Activity detected
-              │                                 │
-              ▼                                 │
-     ┌─────────────────┐                        │
-     │   TRIGGERING    │────────────────────────┘
-     │    SLEEP        │
-     └────────┬────────┘
-              │
-              ▼
-     ┌─────────────────┐
-     │  PRE_SLEEP      │
-     │  (Hibernating)  │
-     │                 │
-     │  state file:    │
-     │  "hibernated"   │
-     └────────┬────────┘
-              │
-              ▼
-     ┌─────────────────┐
-     │   SLEEPING      │
-     │  (Host in S3)   │
-     └────────┬────────┘
-              │
-         Wake event
-              │
-              ▼
-     ┌─────────────────┐
-     │  POST_WAKE      │
-     │  (Resuming VM)  │
-     │                 │
-     │  wake file:     │
-     │  timestamp      │
-     └────────┬────────┘
-              │
-              ▼
-     ┌─────────────────┐
-     │  GRACE_PERIOD   │
-     │  (60s cooldown) │
-     └────────┬────────┘
-              │
-              ▼
-        (Back to ACTIVE)
+ACTIVE (monitoring) ──idle──> IDLE_TRACKING (timer) ──threshold──> TRIGGERING_SLEEP
+     ▲                              │                                    │
+     │                         activity                           systemctl suspend
+     └──────────────────────────────┘                                    │
+                                                                         ▼
+                                                                    PRE_SLEEP
+                                                               (hibernate VMs,
+                                                                shutdown CTs,
+                                                                write state file)
+                                                                         │
+                                                                         ▼
+                                                                    SLEEPING (S3)
+                                                                         │
+                                                                    wake event
+                                                                         │
+                                                                         ▼
+                                                                    POST_WAKE
+                                                               (read state file,
+                                                                resume instances,
+                                                                record wake time)
+                                                                         │
+                                                                         ▼
+                                                                   GRACE_PERIOD
+                                                                    (60s cooldown)
+                                                                         │
+                                                                         ▼
+                                                                   Back to ACTIVE
 ```
 
 ### Robustness Mechanisms
 
-1. **Stale State Detection**: If wake file is newer than idle state file, idle state is considered stale and reset.
-
-2. **Negative Duration Guard**: Clock adjustments (NTP, manual) can cause negative durations; these are clamped to 0.
-
-3. **Consecutive Stop Checks**: Requires 2 consecutive "stopped" readings before confirming hibernation complete (prevents race conditions).
-
-4. **Grace Period**: Prevents immediate re-sleep after wake (user might not have interacted yet).
+1. **Stale State Detection**: If wake file is newer than idle state file, idle state is reset.
+2. **Negative Duration Guard**: Clock adjustments are detected and idle state is reset.
+3. **Consecutive Stop Checks**: Requires 3 consecutive "stopped" readings before confirming VM hibernation.
+4. **Grace Period**: Prevents immediate re-sleep after wake.
+5. **Force-Stop Fallback**: If graceful shutdown times out, `qm stop` / `pct stop` is used.
 
 ---
 
 ## Configuration System
 
-### Configuration File Format
+### Per-Instance Configuration
 
 ```bash
-# /etc/proxmox-sleep.conf
+# VM settings
+VM_<id>_NAME="display name"
+VM_<id>_MONITOR=1|0
+VM_<id>_SLEEP_ACTION=hibernate|shutdown|keep_running|ignore
+VM_<id>_RESUME_ON_WAKE=1|0
+VM_<id>_GAMING_PROCESSES="proc1.exe,proc2.exe"
+VM_<id>_CHECK_POWER_REQUESTS=1|0
+VM_<id>_CHECK_USER_IDLE=1|0
+VM_<id>_CPU_IDLE_THRESHOLD=15        # optional override
+VM_<id>_GPU_IDLE_THRESHOLD=10        # optional override
 
-# VM Configuration
-VMID=100
-VM_NAME="windows"
-
-# Idle Detection
-IDLE_THRESHOLD_MINUTES=15    # 0 = disable idle monitor
-CHECK_INTERVAL=60            # Seconds between polls
-CPU_IDLE_THRESHOLD=15        # VM CPU % threshold
-GPU_IDLE_THRESHOLD=10        # GPU % threshold
-GPU_VENDOR=auto              # nvidia, amd, or auto
-
-# Activity Detection
-CHECK_SSH_SESSIONS=1
-GAMING_PROCESSES="steam.exe,epicgameslauncher.exe,origin.exe"
-HOST_BLOCKING_PROCESSES="unattended-upgrade"
-HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
-CHECK_SLEEP_INHIBITORS=1
-
-# Timing
-HIBERNATE_TIMEOUT=300        # Max wait for hibernation
-WAKE_DELAY=5                 # Delay before starting VM
-WAKE_GRACE_PERIOD=60         # Delay before allowing re-sleep
-
-# Logging
-SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
-IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
-DEBUG=0
+# Container settings
+CONTAINER_<id>_NAME="display name"
+CONTAINER_<id>_MONITOR=1|0
+CONTAINER_<id>_SLEEP_ACTION=shutdown|keep_running|ignore
+CONTAINER_<id>_RESUME_ON_WAKE=1|0
+CONTAINER_<id>_GAMING_PROCESSES="steam,wine,gamescope"
+CONTAINER_<id>_CPU_IDLE_THRESHOLD=15  # optional override
+CONTAINER_<id>_GPU_IDLE_THRESHOLD=10  # optional override
 ```
 
 ### Configuration Validation
 
 Scripts validate configuration at startup:
-
-```bash
-validate_config() {
-    # Ensure VMID is set and numeric
-    if [[ ! "$VMID" =~ ^[0-9]+$ ]]; then
-        die "VMID must be a positive integer"
-    fi
-
-    # Ensure VM exists
-    if ! qm status "$VMID" &>/dev/null; then
-        die "VM $VMID does not exist"
-    fi
-
-    # Validate thresholds
-    if [[ "$IDLE_THRESHOLD_MINUTES" -lt 0 ]]; then
-        die "IDLE_THRESHOLD_MINUTES cannot be negative"
-    fi
-}
-```
+- All listed VM IDs exist (`qm status`)
+- All listed container IDs exist (`pct status`)
+- At least one VM or container is configured
+- `IDLE_THRESHOLD_MINUTES` is a non-negative integer
+- Invalid config exits with `EX_CONFIG` (78), preventing systemd restart loops
 
 ---
 
@@ -566,48 +355,22 @@ validate_config() {
 
 ### Exit Codes
 
-Following sysexits.h conventions:
-
 | Code | Constant | Meaning |
 |------|----------|---------|
 | 0 | EX_OK | Success |
-| 64 | EX_USAGE | Command line usage error |
-| 65 | EX_DATAERR | Data format error |
-| 69 | EX_UNAVAILABLE | Service unavailable |
-| 70 | EX_SOFTWARE | Internal software error |
-| 78 | EX_CONFIG | Configuration error |
+| 78 | EX_CONFIG | Configuration error (prevents restart) |
 
 ### Error Recovery Strategies
 
 | Scenario | Strategy |
 |----------|----------|
-| Guest agent unresponsive | Log warning, attempt hibernation anyway |
-| Hibernation timeout | Log error, allow sleep anyway (VM may be in undefined state) |
-| VM doesn't exist | Exit successfully (nothing to manage) |
-| Config file missing | Use defaults, log warning |
+| Guest agent unresponsive | Fall back to `qm shutdown` |
+| Hibernation timeout | Force shutdown, record `was_shutdown` state |
+| Container shutdown timeout | `pct stop` (force), record `was_shutdown` |
+| nvidia-smi unavailable (host) | Return -1 (no signal), don't block sleep |
+| `pct exec` fails | Return -1 / not found, don't block sleep |
+| VM doesn't exist | Exit with EX_CONFIG at startup |
 | State file corrupted | Reset to default state, continue |
-
-### Logging Strategy
-
-```bash
-log() {
-    local level="$1"
-    local message="$2"
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-
-    # Always log to file
-    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
-
-    # Also log to systemd journal
-    logger -t "proxmox-sleep-manager" -p "daemon.$level" "$message"
-
-    # Debug messages only if DEBUG=1
-    if [[ "$level" == "DEBUG" && "$DEBUG" != "1" ]]; then
-        return
-    fi
-}
-```
 
 ---
 
@@ -620,87 +383,40 @@ log() {
 │                    Proxmox Host (Root)                      │
 │                                                             │
 │  Scripts run as root via systemd                            │
-│  • Full system access                                       │
-│  • Can execute any qm/pvesh command                         │
+│  • Full system access (qm, pct, pvesh)                     │
 │                                                             │
 │    ┌─────────────────────────────────────────────────────┐  │
-│    │              QEMU Guest Agent Boundary              │  │
+│    │              QEMU Guest Agent / pct exec             │  │
 │    │                                                     │  │
-│    │  Commands sent to VM via guest agent                │  │
-│    │  • Limited to what guest agent allows               │  │
-│    │  • VM can't affect host beyond responses            │  │
-│    │                                                     │  │
-│    │    ┌─────────────────────────────────────────────┐  │  │
-│    │    │           Windows VM                        │  │  │
-│    │    │                                             │  │  │
-│    │    │  Idle helper runs as logged-in user         │  │  │
-│    │    │  • Can only read input device idle time     │  │  │
-│    │    │  • Writes to ProgramData (world-readable)   │  │  │
-│    │    └─────────────────────────────────────────────┘  │  │
+│    │  Commands sent to VMs via guest agent                │  │
+│    │  Commands sent to containers via pct exec            │  │
+│    │  • Limited to what each mechanism allows             │  │
 │    └─────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Security Properties
 
-1. **No Network Exposure**: All communication is local (QEMU guest agent socket)
+1. **No Network Exposure**: All communication is local (guest agent socket, pct exec)
 2. **No Credential Storage**: Uses existing Proxmox authentication
-3. **No Privilege Escalation**: Already runs as root via systemd
-4. **Package Signing**: GPG-signed packages for installation verification
-5. **Config Protection**: Config file at `/etc/` with standard permissions
-
-### Potential Risks and Mitigations
-
-| Risk | Mitigation |
-|------|------------|
-| Malicious VM could return false idle data | VM is already trusted (user's own VM) |
-| Config file tampering | Standard /etc/ permissions (root:root 644) |
-| Log injection | Logs are append-only, rotated by logrotate |
-| Race conditions during sleep | Consecutive check requirements, state files |
+3. **Package Signing**: GPG-signed packages for installation verification
+4. **Config Protection**: Config file at `/etc/` with standard permissions
 
 ---
 
 ## Future Considerations
 
-### Potential Enhancements
-
 See [TODO.md](../TODO.md) for detailed specifications on planned major enhancements.
 
-1. **Multi-VM Support with Agent Architecture** (detailed in TODO.md):
-   - Monitor multiple VMs to determine host sleep eligibility
-   - Per-VM configuration: hibernate, shutdown, keep running, or ignore
-   - Per-VM resume-on-wake settings
-   - Delegate idle detection to in-VM agents (move checks from host to guest)
+1. **Agent-Based Architecture** (detailed in TODO.md):
+   - Delegate idle detection to in-VM/container agent processes
    - Cross-platform agents: Windows (enhance existing), Linux (GUI + CLI), macOS (via SSH)
 
 2. **Network-Based Wake**: Integration with Wake-on-LAN triggers
-3. **Scheduled Sleep Windows**: Time-based sleep policies (e.g., always sleep 2-6 AM)
-4. **Power Monitoring**: Integration with smart plugs for actual power usage data
-5. **Web UI**: Proxmox UI integration for status and configuration
+3. **Scheduled Sleep Windows**: Time-based sleep policies
+4. **Power Monitoring**: Integration with smart plugs
+5. **Web UI**: Proxmox UI integration
 6. **Metrics/Alerting**: Prometheus metrics for sleep/wake cycles
-
-### Architecture Extensibility Points
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                   Future Extension Points                    │
-│                                                             │
-│  1. Activity Check Plugins                                  │
-│     └─ Add new check types without modifying core logic     │
-│                                                             │
-│  2. Pre/Post Hooks                                          │
-│     └─ Custom scripts before hibernate / after wake         │
-│                                                             │
-│  3. Notification System                                     │
-│     └─ Webhook/email on sleep/wake events                   │
-│                                                             │
-│  4. State Backend                                           │
-│     └─ Replace file-based state with DB for multi-node      │
-│                                                             │
-│  5. Alternative Sleep Methods                               │
-│     └─ Support QEMU savestate for non-GPU VMs               │
-└─────────────────────────────────────────────────────────────┘
-```
 
 ---
 
@@ -716,6 +432,6 @@ See [TODO.md](../TODO.md) for detailed specifications on planned major enhanceme
 | `/etc/logrotate.d/proxmox-sleep` | Log rotation config |
 | `/var/log/proxmox-sleep-manager.log` | Sleep manager log |
 | `/var/log/proxmox-idle-monitor.log` | Idle monitor log |
-| `/tmp/proxmox-sleep-manager.state` | VM state tracking |
+| `/tmp/proxmox-sleep-manager.state` | Instance state tracking (key=value) |
 | `/tmp/proxmox-idle-monitor.state` | Idle timer state |
 | `/tmp/proxmox-idle-monitor.wake` | Wake timestamp |
