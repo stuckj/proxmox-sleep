@@ -109,7 +109,8 @@ state_get() {
 
 # --- Hibernate / shutdown / resume per instance -----------------------------
 
-# Hibernate a single Windows VM. Writes state key vm_<id>=<hibernated|was_shutdown|not_running>.
+# Hibernate a single Windows VM. State key values used across all sleep paths:
+#   hibernated | shutdown | was_shutdown | not_running | kept_running | ignored
 hibernate_vm() {
     local id="$1"
     local name; name=$(get_cfg "VM_${id}_NAME" "vm-${id}")
@@ -180,7 +181,7 @@ hibernate_vm() {
     return 1
 }
 
-# Cleanly shut down a VM (sleep_action=shutdown). Writes vm_<id>=shutdown or was_shutdown on forced.
+# Cleanly shut down a VM (sleep_action=shutdown). State values: see hibernate_vm.
 shutdown_vm() {
     local id="$1"
     local name; name=$(get_cfg "VM_${id}_NAME" "vm-${id}")
@@ -207,7 +208,7 @@ shutdown_vm() {
     return 1
 }
 
-# Shut down an LXC container. Writes ct_<id>=shutdown or was_shutdown on forced.
+# Shut down an LXC container. State values: see hibernate_vm.
 shutdown_ct() {
     local id="$1"
     local name; name=$(get_cfg "CONTAINER_${id}_NAME" "ct-${id}")

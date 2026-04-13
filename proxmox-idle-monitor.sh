@@ -559,6 +559,14 @@ get_power_requests_detail() {
 get_seconds_since_wake() {
     if [[ ! -f "$WAKE_TIME_FILE" ]]; then echo "-1"; return; fi
     local wake_time; wake_time=$(cat "$WAKE_TIME_FILE")
+    # Guard against a corrupted/partial-write wake file: with `set -u`, an
+    # arithmetic expansion on a non-numeric token would crash the daemon.
+    if ! is_positive_int "$wake_time"; then
+        log "Invalid wake timestamp in $WAKE_TIME_FILE ('$wake_time'), rewriting"
+        date +%s > "$WAKE_TIME_FILE"
+        echo "-1"
+        return
+    fi
     local current_time; current_time=$(date +%s)
     echo $((current_time - wake_time))
 }
