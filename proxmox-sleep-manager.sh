@@ -99,14 +99,6 @@ state_set() {
     echo "${key}=${value}" >> "$STATE_FILE"
 }
 
-state_get() {
-    # Print the value for a given key, empty if missing
-    local key="$1"
-    [[ -f "$STATE_FILE" ]] || return 0
-    # shellcheck disable=SC2002
-    awk -F= -v k="$key" '$1==k {print $2; exit}' "$STATE_FILE"
-}
-
 # --- Hibernate / shutdown / resume per instance -----------------------------
 
 # Hibernate a single Windows VM. State key values used across all sleep paths:

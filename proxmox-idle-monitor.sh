@@ -36,8 +36,6 @@ HOST_BLOCKING_UNITS="${HOST_BLOCKING_UNITS-apt-daily.service,apt-daily-upgrade.s
 CHECK_SLEEP_INHIBITORS="${CHECK_SLEEP_INHIBITORS:-1}"
 
 # Exit codes (sysexits.h)
-# shellcheck disable=SC2034
-EX_OK=0
 EX_CONFIG=78
 
 # ── Config helper ──────────────────────────────────────────────────────────────

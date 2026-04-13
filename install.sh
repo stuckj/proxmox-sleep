@@ -73,8 +73,13 @@ elif [[ -n "$CTID" ]]; then
 fi
 
 # Get idle threshold
-read -p "Auto-sleep after how many idle minutes? [15]: " idle_mins
+read -rp "Auto-sleep after how many idle minutes? [15]: " idle_mins
 IDLE_MINUTES=${idle_mins:-15}
+
+if [[ ! "$IDLE_MINUTES" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}Error: Idle threshold must be a non-negative integer (got: '$IDLE_MINUTES')${NC}"
+    exit 1
+fi
 
 echo ""
 echo "Configuration:"
