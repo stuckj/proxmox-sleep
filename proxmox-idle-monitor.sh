@@ -563,6 +563,13 @@ record_wake_time() {
 }
 
 record_idle_state() {
+    # IDLE_THRESHOLD_MINUTES=0 means auto-sleep is disabled. Without this
+    # guard the "$idle_duration -ge 0" check below would fire immediately.
+    if [[ "$IDLE_THRESHOLD_MINUTES" -le 0 ]]; then
+        debug "Auto-sleep disabled (IDLE_THRESHOLD_MINUTES=0)"
+        return 1
+    fi
+
     local current_time; current_time=$(date +%s)
 
     if [[ ! -f "$STATE_FILE" ]]; then

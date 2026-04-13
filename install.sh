@@ -173,13 +173,20 @@ echo "Enabling services..."
 systemctl enable proxmox-sleep-manager.service
 echo -e "${GREEN}✓ Sleep manager enabled (will hibernate VM before sleep)${NC}"
 
-read -p "Enable auto-sleep monitoring? [Y/n]: " enable_idle
-if [[ ! "$enable_idle" =~ ^[Nn] ]]; then
-    systemctl enable proxmox-idle-monitor.service
-    systemctl start proxmox-idle-monitor.service
-    echo -e "${GREEN}✓ Idle monitor enabled and started${NC}"
+if [[ -z "$VMID" && -z "$CTID" ]]; then
+    echo -e "${YELLOW}⚠ No VM or container configured — skipping idle monitor${NC}"
+    echo -e "${YELLOW}  The idle monitor requires at least one VM or container to watch.${NC}"
+    echo -e "${YELLOW}  Add VM_IDS or CONTAINER_IDS to /etc/proxmox-sleep.conf and then run:${NC}"
+    echo -e "${YELLOW}    systemctl enable --now proxmox-idle-monitor${NC}"
 else
-    echo -e "${YELLOW}⚠ Idle monitor not enabled (you can enable later with: systemctl enable --now proxmox-idle-monitor)${NC}"
+    read -rp "Enable auto-sleep monitoring? [Y/n]: " enable_idle
+    if [[ ! "$enable_idle" =~ ^[Nn] ]]; then
+        systemctl enable proxmox-idle-monitor.service
+        systemctl start proxmox-idle-monitor.service
+        echo -e "${GREEN}✓ Idle monitor enabled and started${NC}"
+    else
+        echo -e "${YELLOW}⚠ Idle monitor not enabled (you can enable later with: systemctl enable --now proxmox-idle-monitor)${NC}"
+    fi
 fi
 
 echo ""
