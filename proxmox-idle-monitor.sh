@@ -756,6 +756,12 @@ is_system_idle() {
 
     # ── Per-container checks (monitored, running) ─────────────────
 
+    # get_ct_gpu_usage queries host-side nvidia-smi and does not depend on the
+    # container id. Read it once per check cycle and reuse across containers
+    # instead of fork-exec'ing nvidia-smi N times. Sentinel -1 means unread;
+    # we populate it lazily on first use below.
+    local ct_gpu_usage_cached="-1"
+    local ct_gpu_read=0
     for id in $CONTAINER_IDS; do
         monitor=$(get_cfg "CONTAINER_${id}_MONITOR" "1")
         [[ "$monitor" != "1" ]] && continue
@@ -765,9 +771,14 @@ is_system_idle() {
             continue
         fi
 
-        # GPU (host-side nvidia-smi — degrades gracefully when GPU is in vfio)
+        # GPU (host-side nvidia-smi — degrades gracefully when GPU is in vfio).
+        # Cached across all containers in this cycle.
         local gpu_threshold; gpu_threshold=$(get_cfg "CONTAINER_${id}_GPU_IDLE_THRESHOLD" "$GPU_IDLE_THRESHOLD")
-        local gpu_usage; gpu_usage=$(get_ct_gpu_usage)
+        if [[ "$ct_gpu_read" == "0" ]]; then
+            ct_gpu_usage_cached=$(get_ct_gpu_usage)
+            ct_gpu_read=1
+        fi
+        local gpu_usage="$ct_gpu_usage_cached"
         debug "Container $id host GPU usage: $gpu_usage%"
         if is_valid_metric "$gpu_usage" && [[ "$gpu_usage" -gt "$gpu_threshold" ]]; then
             debug "Container $id GPU active ($gpu_usage% > $gpu_threshold%)"

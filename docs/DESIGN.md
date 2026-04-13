@@ -48,9 +48,11 @@ Running Windows VMs and Linux containers with GPU passthrough on Proxmox hosts p
 
 Use **Windows hibernation** for VMs and **graceful shutdown** for LXC containers as state preservation mechanisms, decoupled from host sleep:
 
-1. **Before host sleep**: Hibernate Windows VMs (saves RAM to disk, releases all hardware) and shut down LXC containers
-2. **Host sleeps**: With no VMs/containers running, host enters safe S3/S2idle state
-3. **Host wakes**: Start VMs (which resume from hibernation) and start containers
+1. **Before host sleep** (default): Hibernate Windows VMs (saves RAM to disk, releases all hardware) and shut down LXC containers
+2. **Host sleeps**: In the typical path, after all managed VMs/containers have been stopped, the host enters a safe S3/S2idle state
+3. **Host wakes**: Start previously stopped VMs (which resume from hibernation) and start previously stopped containers
+
+Individual instances can opt out of being stopped by setting `SLEEP_ACTION=keep_running` or `SLEEP_ACTION=ignore`, or by setting `MONITOR=0` to exclude them from idle detection entirely. In practice, VMs with PCI passthrough (e.g., a passthrough GPU) generally **must** be stopped before host sleep — leaving them running is usually unsafe and can crash the host on wake.
 
 ### Two-Component Design
 
