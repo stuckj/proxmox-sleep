@@ -17,7 +17,13 @@ HIBERNATE_TIMEOUT="${HIBERNATE_TIMEOUT:-300}"
 SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT:-120}"
 WAKE_DELAY="${WAKE_DELAY:-5}"
 LOG_FILE="${SLEEP_MANAGER_LOG:-/var/log/proxmox-sleep-manager.log}"
-STATE_FILE="/tmp/proxmox-sleep-manager.state"
+
+# Runtime state lives under /run/proxmox-sleep, a root-owned tmpfs directory.
+# Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
+# users (everything here is written as root via `>`).
+STATE_DIR="/run/proxmox-sleep"
+install -d -m 0755 -o root -g root "$STATE_DIR" 2>/dev/null || true
+STATE_FILE="$STATE_DIR/sleep-manager.state"
 
 # Logging
 log() {
@@ -119,7 +125,13 @@ hibernate_vm() {
         log "WARNING: Guest agent not responsive for VM $id, attempting shutdown instead"
         qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT"
         local rc=$?
-        state_set "vm_${id}" "was_shutdown"
+        # Distinguish clean graceful shutdown (shutdown) from forced / timeout
+        # stop (was_shutdown) so post_wake and status can tell them apart.
+        if [[ $rc -eq 0 ]]; then
+            state_set "vm_${id}" "shutdown"
+        else
+            state_set "vm_${id}" "was_shutdown"
+        fi
         return $rc
     fi
 
@@ -175,22 +187,16 @@ shutdown_vm() {
         return 0
     fi
 
-    if ! qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
-        log "WARNING: qm shutdown for VM $id returned non-zero"
+    # `qm shutdown --timeout N` already blocks until the VM stops or N seconds
+    # elapse, so we trust its exit code rather than polling afterwards (which
+    # would double the worst-case wait).
+    if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        log "VM $id shut down cleanly"
+        state_set "vm_${id}" "shutdown"
+        return 0
     fi
 
-    local waited=0
-    while [[ $waited -lt $SHUTDOWN_TIMEOUT ]]; do
-        sleep 3
-        waited=$((waited + 3))
-        if ! vm_is_running "$id"; then
-            log "VM $id shut down cleanly after ${waited}s"
-            state_set "vm_${id}" "shutdown"
-            return 0
-        fi
-    done
-
-    log "ERROR: VM $id shutdown timeout; forcing stop"
+    log "ERROR: VM $id shutdown timeout or failure; forcing stop"
     qm stop "$id" &>/dev/null || true
     state_set "vm_${id}" "was_shutdown"
     return 1
@@ -208,22 +214,16 @@ shutdown_ct() {
         return 0
     fi
 
-    if ! pct shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
-        log "WARNING: pct shutdown for container $id returned non-zero"
+    # `pct shutdown --timeout N` already blocks until the container stops or
+    # N seconds elapse, so we trust its exit code rather than polling
+    # afterwards (which would double the worst-case wait).
+    if pct shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        log "Container $id shut down cleanly"
+        state_set "ct_${id}" "shutdown"
+        return 0
     fi
 
-    local waited=0
-    while [[ $waited -lt $SHUTDOWN_TIMEOUT ]]; do
-        sleep 3
-        waited=$((waited + 3))
-        if ! ct_is_running "$id"; then
-            log "Container $id shut down cleanly after ${waited}s"
-            state_set "ct_${id}" "shutdown"
-            return 0
-        fi
-    done
-
-    log "ERROR: Container $id shutdown timeout; forcing stop"
+    log "ERROR: Container $id shutdown timeout or failure; forcing stop"
     pct stop "$id" &>/dev/null || true
     state_set "ct_${id}" "was_shutdown"
     return 1
@@ -350,8 +350,8 @@ post_wake() {
 
     # CRITICAL: clear idle monitor state and record wake time before resuming
     # anything, so the idle monitor doesn't immediately re-trigger sleep.
-    local idle_state_file="/tmp/proxmox-idle-monitor.state"
-    local idle_wake_file="/tmp/proxmox-idle-monitor.wake"
+    local idle_state_file="$STATE_DIR/idle-monitor.state"
+    local idle_wake_file="$STATE_DIR/idle-monitor.wake"
     if [[ -f "$idle_state_file" ]]; then
         log "Clearing stale idle monitor state"
         rm -f "$idle_state_file"

@@ -219,7 +219,7 @@ shellcheck -x *.sh
 
 - **Logging**: Use `log "LEVEL" "message"` not `echo`
 - **Exit codes**: Follow sysexits.h (0=OK, 64=usage, 78=config, etc.)
-- **State files**: Use `/tmp/proxmox-*.state` for runtime state
+- **State files**: Use `/run/proxmox-sleep/*.{state,wake}` for runtime state (root-owned, avoids /tmp symlink risks)
 - **Config**: All config in `/etc/proxmox-sleep.conf`
 - **Packages**: Support both deb and rpm via nfpm
 

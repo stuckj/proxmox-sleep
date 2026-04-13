@@ -4,7 +4,9 @@
 # Reload systemd to clean up removed service files
 systemctl daemon-reload || true
 
-# Clean up state files
+# Clean up runtime state directory
+rm -rf /run/proxmox-sleep
+# Clean up legacy /tmp state files from pre-/run versions
 rm -f /tmp/proxmox-sleep-manager.state
 rm -f /tmp/proxmox-idle-monitor.state
 rm -f /tmp/proxmox-idle-monitor.wake

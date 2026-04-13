@@ -23,8 +23,14 @@ GPU_VENDOR="${GPU_VENDOR:-auto}"
 CHECK_SSH_SESSIONS="${CHECK_SSH_SESSIONS:-1}"
 WAKE_GRACE_PERIOD="${WAKE_GRACE_PERIOD:-60}"
 LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
-STATE_FILE="/tmp/proxmox-idle-monitor.state"
-WAKE_TIME_FILE="/tmp/proxmox-idle-monitor.wake"
+
+# Runtime state lives under /run/proxmox-sleep, a root-owned tmpfs directory.
+# Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
+# users (everything here is written as root via `>`).
+STATE_DIR="/run/proxmox-sleep"
+install -d -m 0755 -o root -g root "$STATE_DIR" 2>/dev/null || true
+STATE_FILE="$STATE_DIR/idle-monitor.state"
+WAKE_TIME_FILE="$STATE_DIR/idle-monitor.wake"
 HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES-}"
 HOST_BLOCKING_UNITS="${HOST_BLOCKING_UNITS-apt-daily.service,apt-daily-upgrade.service}"
 CHECK_SLEEP_INHIBITORS="${CHECK_SLEEP_INHIBITORS:-1}"

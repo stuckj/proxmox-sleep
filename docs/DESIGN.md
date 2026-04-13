@@ -146,7 +146,7 @@ Each instance has a configurable `SLEEP_ACTION`:
 
 ### State File
 
-Pre-sleep records one line per instance in `/tmp/proxmox-sleep-manager.state`:
+Pre-sleep records one line per instance in `/run/proxmox-sleep/sleep-manager.state`:
 
 ```
 vm_100=hibernated
@@ -268,9 +268,9 @@ Host Script ──> pvesh get /nodes/{node}/qemu/{vmid}/status/current   (VM CPU
 
 | File | Purpose | Lifecycle |
 |------|---------|-----------|
-| `/tmp/proxmox-sleep-manager.state` | Instance states before sleep (key=value, one per line) | Created pre-sleep, read post-wake, deleted after use |
-| `/tmp/proxmox-idle-monitor.state` | Idle timer start timestamp | Created when idle begins, deleted when active |
-| `/tmp/proxmox-idle-monitor.wake` | Last wake timestamp | Created post-wake, used for grace period |
+| `/run/proxmox-sleep/sleep-manager.state` | Instance states before sleep (key=value, one per line) | Created pre-sleep, read post-wake, deleted after use |
+| `/run/proxmox-sleep/idle-monitor.state` | Idle timer start timestamp | Created when idle begins, deleted when active |
+| `/run/proxmox-sleep/idle-monitor.wake` | Last wake timestamp | Created post-wake, used for grace period |
 
 ### State Transitions
 
@@ -432,6 +432,6 @@ See [TODO.md](../TODO.md) for detailed specifications on planned major enhanceme
 | `/etc/logrotate.d/proxmox-sleep` | Log rotation config |
 | `/var/log/proxmox-sleep-manager.log` | Sleep manager log |
 | `/var/log/proxmox-idle-monitor.log` | Idle monitor log |
-| `/tmp/proxmox-sleep-manager.state` | Instance state tracking (key=value) |
-| `/tmp/proxmox-idle-monitor.state` | Idle timer state |
-| `/tmp/proxmox-idle-monitor.wake` | Wake timestamp |
+| `/run/proxmox-sleep/sleep-manager.state` | Instance state tracking (key=value) |
+| `/run/proxmox-sleep/idle-monitor.state` | Idle timer state |
+| `/run/proxmox-sleep/idle-monitor.wake` | Wake timestamp |
