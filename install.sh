@@ -40,6 +40,11 @@ fi
 read -rp "Enter your Windows VM ID (leave blank to skip): " vmid
 VMID=${vmid:-}
 
+if [[ -n "$VMID" && ! "$VMID" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}Error: VM ID must be a positive integer (got: '$VMID')${NC}"
+    exit 1
+fi
+
 VM_NAME=""
 if [[ -n "$VMID" ]] && qm status "$VMID" &>/dev/null; then
     VM_NAME=$(qm config "$VMID" | grep "^name:" | awk '{print $2}')
@@ -50,8 +55,13 @@ elif [[ -n "$VMID" ]]; then
 fi
 
 # Get container ID (optional)
-read -p "Enter an LXC container ID to manage (leave blank to skip): " ctid
+read -rp "Enter an LXC container ID to manage (leave blank to skip): " ctid
 CTID=${ctid:-}
+
+if [[ -n "$CTID" && ! "$CTID" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}Error: Container ID must be a positive integer (got: '$CTID')${NC}"
+    exit 1
+fi
 
 CT_NAME=""
 if [[ -n "$CTID" ]] && pct status "$CTID" &>/dev/null; then

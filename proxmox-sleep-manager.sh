@@ -123,16 +123,15 @@ hibernate_vm() {
 
     if ! guest_agent_ready "$id"; then
         log "WARNING: Guest agent not responsive for VM $id, attempting shutdown instead"
-        qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT"
-        local rc=$?
-        # Distinguish clean graceful shutdown (shutdown) from forced / timeout
-        # stop (was_shutdown) so post_wake and status can tell them apart.
-        if [[ $rc -eq 0 ]]; then
+        if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+            log "VM $id shut down cleanly via fallback"
             state_set "vm_${id}" "shutdown"
-        else
-            state_set "vm_${id}" "was_shutdown"
+            return 0
         fi
-        return $rc
+        log "WARNING: Graceful shutdown failed for VM $id, forcing stop"
+        qm stop "$id" &>/dev/null || true
+        state_set "vm_${id}" "was_shutdown"
+        return 1
     fi
 
     state_set "vm_${id}" "hibernated"
@@ -169,8 +168,14 @@ hibernate_vm() {
         fi
     done
 
-    log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s for VM $id; forcing shutdown"
-    qm shutdown "$id" --timeout 60
+    log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s for VM $id; attempting graceful shutdown"
+    if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        log "VM $id shut down cleanly after hibernation timeout"
+        state_set "vm_${id}" "shutdown"
+        return 1
+    fi
+    log "ERROR: VM $id shutdown failed after hibernation timeout; forcing stop"
+    qm stop "$id" &>/dev/null || true
     state_set "vm_${id}" "was_shutdown"
     return 1
 }
