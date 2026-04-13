@@ -165,7 +165,10 @@ hibernate_vm() {
     if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
         log "VM $id shut down cleanly after hibernation timeout"
         state_set "vm_${id}" "shutdown"
-        return 1
+        # Hibernation failed, but the VM is cleanly stopped and the host can
+        # safely sleep — from the caller's point of view the pre-sleep action
+        # succeeded. Return non-zero only if we couldn't stop the VM cleanly.
+        return 0
     fi
     log "ERROR: VM $id shutdown failed after hibernation timeout; forcing stop"
     qm stop "$id" &>/dev/null || true

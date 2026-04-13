@@ -89,9 +89,17 @@ extract_int()          { echo "$1" | grep -oE '^-?[0-9]+' | head -1; }
 extract_positive_int() { echo "$1" | grep -oE '^[0-9]+' | head -1; }
 
 # Parse JSON "out-data" field from `qm guest exec` output.
+# The raw JSON spans multiple shell lines, so real \n/\r in the wrapper must be
+# collapsed before extracting `out-data`.  The *value* of out-data, however, is
+# escaped (\\r\\n / \\n), and must be converted back to real newlines so that
+# callers can distinguish separate lines (e.g., a process list) when matching.
 parse_guest_output() {
-    local json="$1"
-    echo "$json" | tr -d '\n\r' | sed -n 's/.*"out-data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\r\\n//g; s/\\r//g; s/\\n//g'
+    local json="$1" out
+    out=$(printf '%s' "$json" | tr -d '\n\r' | sed -n 's/.*"out-data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    out="${out//\\r\\n/$'\n'}"
+    out="${out//\\n/$'\n'}"
+    out="${out//\\r/}"
+    printf '%s' "$out"
 }
 
 # ── Validate configuration ─────────────────────────────────────────────────────
@@ -327,7 +335,10 @@ check_vm_gaming_processes() {
     for proc in "${gaming_procs[@]}"; do
         proc=$(echo "$proc" | xargs)
         [[ -z "$proc" ]] && continue
-        local proc_name="${proc%.exe}"
+        # Lowercase first so we strip the .exe suffix case-insensitively —
+        # users sometimes write "Steam.EXE" / "STEAM.EXE" in config.
+        local proc_name="${proc,,}"
+        proc_name="${proc_name%.exe}"
         # -F = fixed-string match: "Battle.net" etc. contain regex metachars.
         if echo "$processes" | grep -Fqi -- "$proc_name"; then
             debug "Found gaming process in VM $id: $proc"
