@@ -28,7 +28,11 @@ LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 # Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
 # users (everything here is written as root via `>`).
 STATE_DIR="/run/proxmox-sleep"
-install -d -m 0755 -o root -g root "$STATE_DIR" 2>/dev/null || true
+# Note: EX_CONFIG=78 is defined below; use the literal here since it's early.
+if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
+    echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
+    exit 78
+fi
 STATE_FILE="$STATE_DIR/idle-monitor.state"
 WAKE_TIME_FILE="$STATE_DIR/idle-monitor.wake"
 HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES-}"
@@ -339,8 +343,11 @@ check_vm_gaming_processes() {
         # users sometimes write "Steam.EXE" / "STEAM.EXE" in config.
         local proc_name="${proc,,}"
         proc_name="${proc_name%.exe}"
-        # -F = fixed-string match: "Battle.net" etc. contain regex metachars.
-        if echo "$processes" | grep -Fqi -- "$proc_name"; then
+        # -Fxqi: fixed-string, whole-line, quiet, case-insensitive.
+        # Exact match (not substring) so "steam" does not also catch
+        # "steamwebhelper". Users who want to block sleep on helpers too
+        # must list them explicitly in GAMING_PROCESSES.
+        if echo "$processes" | grep -Fxqi -- "$proc_name"; then
             debug "Found gaming process in VM $id: $proc"
             return 0
         fi
@@ -400,15 +407,24 @@ get_ct_cpu_usage() {
 
 # Host-side nvidia-smi for containers that use the GPU directly.  Degrades
 # gracefully: missing binary, no device, or vfio-pci bound GPU all return -1.
+# On multi-GPU hosts, nvidia-smi returns one row per GPU; take the max so
+# activity on any GPU blocks sleep.
 get_ct_gpu_usage() {
     if ! command -v nvidia-smi &>/dev/null; then
         echo "-1"
         return
     fi
-    local output
+    local output max_val
     output=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null) || { echo "-1"; return; }
-    local val; val=$(extract_positive_int "$output")
-    echo "${val:--1}"
+    max_val=$(echo "$output" | awk '
+        BEGIN { max = -1 }
+        /^[[:space:]]*[0-9]+[[:space:]]*$/ {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+            if ($0 + 0 > max) { max = $0 + 0 }
+        }
+        END { print max }
+    ')
+    echo "${max_val:--1}"
 }
 
 check_ct_gaming_processes() {
@@ -421,13 +437,19 @@ check_ct_gaming_processes() {
 
     IFS=',' read -ra gaming_procs <<< "$procs"
 
+    # Use `ps -eo args=` (full command line) and extract argv[0]'s basename
+    # per line. The `comm` column is truncated to 15 chars by the kernel,
+    # which would silently miss long process names like "steamwebhelper"
+    # (14 — fits, but any longer name would be cut off).
     local processes
-    processes=$(pct exec "$id" -- ps -eo comm= 2>/dev/null) || processes=""
+    processes=$(pct exec "$id" -- sh -c 'ps -eo args= 2>/dev/null | awk "{print \$1}" | while IFS= read -r p; do basename "$p"; done' 2>/dev/null) || processes=""
 
     for proc in "${gaming_procs[@]}"; do
         proc=$(echo "$proc" | xargs)
         [[ -z "$proc" ]] && continue
-        if echo "$processes" | grep -Fqi -- "$proc"; then
+        # -Fxqi: fixed-string, whole-line, quiet, case-insensitive.
+        # Exact match so "steam" does not also catch "steamwebhelper".
+        if echo "$processes" | grep -Fxqi -- "$proc"; then
             debug "Found gaming process in container $id: $proc"
             return 0
         fi
@@ -696,14 +718,24 @@ is_system_idle() {
             return 1
         fi
 
-        # User idle (Windows)
+        # User idle (Windows). Use an instantaneous "recently active" signal
+        # (CHECK_INTERVAL seconds) rather than the full IDLE_THRESHOLD_MINUTES
+        # window — record_idle_state is the single source of truth for the
+        # configured idle duration. Previously both places gated on the full
+        # threshold, which effectively doubled the real post-wake wait before
+        # the next sleep fired.
+        #
+        # Wake safety: get_effective_idle_time clamps to seconds_since_wake,
+        # so the first CHECK_INTERVAL seconds after wake always read as
+        # "recently active" regardless of what Windows reports for win_idle.
+        # Combined with WAKE_GRACE_PERIOD in trigger_sleep, this still
+        # prevents immediate re-sleep after wake.
         local check_user_idle; check_user_idle=$(get_cfg "VM_${id}_CHECK_USER_IDLE" "1")
         if [[ "$check_user_idle" == "1" ]]; then
             local effective_idle; effective_idle=$(get_effective_idle_time "$id")
             debug "VM $id effective idle time: ${effective_idle}s"
-            local idle_threshold_seconds=$((IDLE_THRESHOLD_MINUTES * 60))
-            if is_valid_metric "$effective_idle" && [[ "$effective_idle" -lt "$idle_threshold_seconds" ]]; then
-                debug "VM $id user recently active (${effective_idle}s < ${idle_threshold_seconds}s)"
+            if is_valid_metric "$effective_idle" && [[ "$effective_idle" -lt "$CHECK_INTERVAL" ]]; then
+                debug "VM $id user recently active (${effective_idle}s < ${CHECK_INTERVAL}s)"
                 return 1
             fi
         fi

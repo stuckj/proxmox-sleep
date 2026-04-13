@@ -93,7 +93,11 @@ VM_100_SLEEP_ACTION=hibernate
 VM_100_RESUME_ON_WAKE=1
 
 # Gaming processes — prevent sleep when any of these are running in the VM.
-# Comma-separated, matched case-insensitively.  Set to "" to disable.
+# Comma-separated, matched case-insensitively as EXACT names (not substrings):
+# "steam.exe" matches only "steam" in Get-Process output, not "steamwebhelper".
+# The .exe suffix is stripped automatically before matching. To also block
+# sleep on helper processes, add them explicitly (e.g., "steamwebhelper.exe").
+# Set to "" to disable.
 VM_100_GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe"
 
 # Check Windows power requests via powercfg /requests (1=on, 0=off)
@@ -125,8 +129,12 @@ VM_100_CHECK_USER_IDLE=1
 #
 # CONTAINER_200_RESUME_ON_WAKE=1
 #
-# Gaming processes in the container (Linux names, comma-separated).
-# Checked via 'pct exec <id> -- ps -eo comm='.
+# Gaming processes in the container (Linux executable basenames, comma-separated).
+# Matched case-insensitively as EXACT names (not substrings): "steam" matches
+# only a process whose executable basename is "steam", not "steamwebhelper".
+# List helper processes explicitly if you want them to block sleep too.
+# Checked via 'pct exec <id> -- ps -eo args=' (uses the full command line so
+# long names like "steamwebhelper" aren't truncated by the kernel's comm limit).
 # CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,proton,gamescope"
 #
 # Optional per-instance overrides:

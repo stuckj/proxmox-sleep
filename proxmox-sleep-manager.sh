@@ -22,7 +22,10 @@ LOG_FILE="${SLEEP_MANAGER_LOG:-/var/log/proxmox-sleep-manager.log}"
 # Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
 # users (everything here is written as root via `>`).
 STATE_DIR="/run/proxmox-sleep"
-install -d -m 0755 -o root -g root "$STATE_DIR" 2>/dev/null || true
+if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
+    echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
+    exit 1
+fi
 STATE_FILE="$STATE_DIR/sleep-manager.state"
 
 # Logging

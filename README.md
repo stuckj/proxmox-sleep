@@ -298,6 +298,11 @@ CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,gamescope"
 VM_100_GAMING_PROCESSES=""
 ```
 
+Matching is **case-insensitive and exact** — not substring. Configuring `steam`
+matches only a process literally named `steam`, not `steamwebhelper`. If you want
+to block sleep while helper processes are running too, add them explicitly to the
+list. For Windows VMs the `.exe` suffix is stripped automatically before matching.
+
 ## Trying Native Sleep Instead
 
 If you want to try making native S3 sleep work with your GPU passthrough (faster wake times), see `NATIVE_SLEEP_TROUBLESHOOTING.md`.
