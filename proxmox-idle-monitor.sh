@@ -27,7 +27,10 @@ LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 # Runtime state lives under /run/proxmox-sleep, a root-owned tmpfs directory.
 # Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
 # users (everything here is written as root via `>`).
-STATE_DIR="/run/proxmox-sleep"
+# PROXMOX_SLEEP_STATE_DIR redirects this for the offline test harness only.
+# It is not a supported config knob: the systemd units run with a clean
+# environment, so nothing but a root-run test can set it.
+STATE_DIR="${PROXMOX_SLEEP_STATE_DIR:-/run/proxmox-sleep}"
 # Note: EX_CONFIG=78 is defined below; use the literal here since it's early.
 if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
     echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
@@ -593,7 +596,10 @@ get_seconds_since_wake() {
     # Guard against a corrupted/partial-write wake file: with `set -u`, an
     # arithmetic expansion on a non-numeric token would crash the daemon.
     if ! is_positive_int "$wake_time"; then
-        log "Invalid wake timestamp in $WAKE_TIME_FILE ('$wake_time'), rewriting"
+        # This function's stdout IS its return value (callers use $(...)), and
+        # log() echoes through tee, so the message must go to stderr or it
+        # would be concatenated onto the "-1" the caller parses.
+        log "Invalid wake timestamp in $WAKE_TIME_FILE ('$wake_time'), rewriting" >&2
         date +%s > "$WAKE_TIME_FILE"
         echo "-1"
         return

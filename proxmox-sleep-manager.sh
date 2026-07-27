@@ -21,7 +21,10 @@ LOG_FILE="${SLEEP_MANAGER_LOG:-/var/log/proxmox-sleep-manager.log}"
 # Runtime state lives under /run/proxmox-sleep, a root-owned tmpfs directory.
 # Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
 # users (everything here is written as root via `>`).
-STATE_DIR="/run/proxmox-sleep"
+# PROXMOX_SLEEP_STATE_DIR redirects this for the offline test harness only.
+# It is not a supported config knob: the systemd units run with a clean
+# environment, so nothing but a root-run test can set it.
+STATE_DIR="${PROXMOX_SLEEP_STATE_DIR:-/run/proxmox-sleep}"
 if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
     echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
     exit 1

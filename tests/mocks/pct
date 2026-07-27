@@ -1,0 +1,78 @@
+#!/bin/bash
+#
+# Mock `pct` for the offline test harness. See mocks/qm for the conventions.
+#
+# `pct exec <id> -- sh -c '<script>'` actually *runs* the script locally with a
+# stubbed `ps` on PATH, so the real `ps -eo args=` + awk + basename pipeline in
+# check_ct_gaming_processes is exercised rather than short-circuited.
+
+set -uo pipefail
+
+mock_env() {
+    local name="$1" def="${2:-}"
+    if [[ -n "${!name+x}" ]]; then printf '%s' "${!name}"; else printf '%s' "$def"; fi
+}
+
+log_call() {
+    [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'pct %s\n' "$*" >> "$MOCK_CALL_LOG"
+    return 0
+}
+
+get_status() {
+    # NB: separate statements — `local a=$1 b=$a` expands $a before it is set.
+    local id="$1"
+    local f="${MOCK_RUNTIME:-}/pct_status_$id"
+    if [[ -f "$f" ]]; then cat "$f"; else mock_env "MOCK_PCT_STATUS_$id" stopped; fi
+}
+
+set_status() {
+    [[ -n "${MOCK_RUNTIME:-}" ]] && printf '%s' "$2" > "$MOCK_RUNTIME/pct_status_$1"
+    return 0
+}
+
+log_call "$@"
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+    status)
+        printf 'status: %s\n' "$(get_status "${1:-}")"
+        ;;
+
+    exec)
+        id="${1:-}"; shift || true
+        [[ "$(get_status "$id")" == "running" ]] || exit 1
+        # Strip the leading `--` separator, then expect `sh -c <script>`.
+        [[ "${1:-}" == "--" ]] && shift
+        if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+            MOCK_PS_OUTPUT="$(mock_env "MOCK_CT_PS_$id" "")" \
+                PATH="${MOCK_BIN_DIR:-}:$PATH" bash -c "$3"
+            exit $?
+        fi
+        exit 0
+        ;;
+
+    shutdown)
+        id="${1:-}"
+        rc=$(mock_env "MOCK_PCT_SHUTDOWN_RC_$id" 0)
+        [[ "$rc" == "0" ]] && set_status "$id" stopped
+        exit "$rc"
+        ;;
+
+    stop)
+        id="${1:-}"
+        set_status "$id" stopped
+        exit "$(mock_env "MOCK_PCT_STOP_RC_$id" 0)"
+        ;;
+
+    start)
+        id="${1:-}"
+        rc=$(mock_env "MOCK_PCT_START_RC_$id" 0)
+        [[ "$rc" == "0" ]] && set_status "$id" running
+        exit "$rc"
+        ;;
+
+    *)
+        exit 0
+        ;;
+esac

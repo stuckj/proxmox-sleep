@@ -1,0 +1,22 @@
+#!/bin/bash
+#
+# Mock `pgrep`. Matches the pattern (last argument) against the comma-separated
+# MOCK_RUNNING_PROCS list as a substring, covering both call sites:
+#   pgrep <name>                    - host blocking process check
+#   pgrep -f "qemu.*-id <id> "      - lingering QEMU check in hibernate_vm
+# Default: nothing is running, so hibernation confirms cleanly.
+
+set -uo pipefail
+
+pattern="${!#}"
+
+IFS=',' read -ra procs <<< "${MOCK_RUNNING_PROCS:-}"
+for p in "${procs[@]}"; do
+    p="$(echo "$p" | xargs)"
+    [[ -z "$p" ]] && continue
+    if [[ "$pattern" == *"$p"* || "$p" == *"$pattern"* ]]; then
+        echo 12345
+        exit 0
+    fi
+done
+exit 1

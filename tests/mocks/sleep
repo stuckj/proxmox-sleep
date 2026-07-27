@@ -1,0 +1,10 @@
+#!/bin/bash
+#
+# Mock `sleep` that returns immediately, so tests exercising the hibernation
+# poll loop and the post-wake resume delay finish in milliseconds instead of
+# minutes. The requested duration is still recorded in the call log, which lets
+# a test assert on the *intended* timing without waiting for it.
+
+set -uo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'sleep %s\n' "$*" >> "$MOCK_CALL_LOG"
+exit 0

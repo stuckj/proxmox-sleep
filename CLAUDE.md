@@ -190,6 +190,11 @@ gh api "repos/${REPO}/pulls/${PR_NUM}/comments" --paginate | jq '.[].id'
 ### Testing Changes
 
 ```bash
+# Offline test suite - no Proxmox host, no root, no network required.
+# Run this before pushing; see tests/README.md for what it covers.
+tests/run-tests.sh
+tests/run-tests.sh gaming     # filter by test name substring
+
 # Syntax check
 bash -n proxmox-sleep-manager.sh
 
@@ -202,6 +207,11 @@ shellcheck -x *.sh
 # Test status display
 ./proxmox-idle-monitor.sh status
 ```
+
+**When adding a check or a config setting, add a test for it.** The suite
+mocks `qm`/`pct`/`pvesh`/`nvidia-smi`, so almost every code path is reachable
+without hardware — including the ones that are awkward to reproduce on a real
+host, such as hibernation timeouts and a GPU bound to `vfio-pci`.
 
 ## File Locations
 
