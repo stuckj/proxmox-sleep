@@ -1,0 +1,64 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Offline test suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The harness is pure bash, so run it against more than one bash
+        # release: ubuntu-22.04 is pinned to an older one, ubuntu-latest
+        # tracks whatever GitHub currently ships.
+        os: [ubuntu-22.04, ubuntu-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show bash version
+        run: bash --version | head -1
+
+      - name: Syntax check all shell scripts
+        run: |
+          # -type f so the mock subdirectories are skipped rather than fed to
+          # bash -n (which would fail the step under the runner's `set -e`).
+          while IFS= read -r -d '' f; do
+            echo "checking $f"
+            bash -n "$f"
+          done < <(find . -type f \
+                        \( -name '*.sh' -o -path './tests/mocks/*' \) \
+                        -not -path './.git/*' -print0)
+
+      - name: Run offline test suite
+        run: tests/run-tests.sh
+
+  # Guards the property the suite depends on: the tests must never reach a real
+  # Proxmox host, so a mock going missing has to fail loudly rather than
+  # silently shelling out to something on the runner.
+  no-real-proxmox-tooling:
+    name: Verify Proxmox tooling is absent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Assert qm/pct/pvesh are not installed on the runner
+        run: |
+          for cmd in qm pct pvesh nvidia-smi; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "::error::'$cmd' exists on the runner; the test suite would" \
+                   "no longer prove the mocks are being used."
+              exit 1
+            fi
+          done
+          echo "None of qm/pct/pvesh/nvidia-smi are present — mocks are authoritative."
