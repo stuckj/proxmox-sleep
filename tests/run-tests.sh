@@ -888,6 +888,130 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_failed_resume_survives_next_sleep_cycle() {
+    # The next pre_sleep truncates the state file. An instance still awaiting
+    # resume is stopped by then, so a naive rebuild recorded not_running and
+    # the VM was never started again.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    export MOCK_QM_START_RC_100=1
+    manager post-wake > /dev/null
+    assert_contains "retained after failure" "$(read_state)" "vm_100=shutdown"
+
+    # Second cycle: host sleeps again while the VM is still down.
+    manager pre-sleep > /dev/null
+    assert_contains     "still pending"   "$(read_state)" "vm_100=shutdown"
+    assert_not_contains "not downgraded"  "$(read_state)" "not_running"
+
+    unset MOCK_QM_START_RC_100
+    : > "$MOCK_CALL_LOG"
+    manager post-wake > /dev/null
+    assert_contains "recovers on the next wake" "$(calls)" "qm start 100"
+}
+
+test_post_wake_reports_failure() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    export MOCK_QM_START_RC_100=1
+
+    local rc
+    manager post-wake > /dev/null; rc=$?
+    assert_rc "non-zero when an instance did not resume" "$rc" "1"
+}
+
+test_explicit_per_instance_setting_beats_legacy_shim() {
+    # A half-migrated config keeps VMID= but adds VM_<id>_* keys. The shim used
+    # to overwrite them all, hibernating a VM the user asked to keep running.
+    write_config <<'EOF'
+VMID=100
+VM_NAME="win"
+VM_100_SLEEP_ACTION=keep_running
+VM_100_RESUME_ON_WAKE=0
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out; out="$(manager status)"
+    assert_contains "honours explicit action" "$out" "Sleep action:  keep_running"
+
+    manager pre-sleep > /dev/null
+    assert_contains     "left running"    "$(read_state)" "vm_100=kept_running"
+    assert_not_contains "not hibernated"  "$(calls)"      "shutdown /h"
+}
+
+test_non_numeric_ssh_flag_still_checks() {
+    write_config <<'EOF'
+VM_IDS="100"
+CHECK_SSH_SESSIONS=yes
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_WHO="admin pts/0 2026-01-01 10:00 (10.0.0.5)"
+
+    local out; out="$(monitor check)"
+    assert_contains "session still detected" "$out" "SSH Sessions: YES"
+    assert_contains "blocks sleep"           "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_bad_host_flag_is_a_config_error() {
+    write_config <<'EOF'
+VM_IDS="100"
+CHECK_SSH_SESSIONS=yes
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "CHECK_SSH_SESSIONS='yes' must be 0 or 1"
+}
+
+test_non_numeric_threshold_is_a_config_error() {
+    # Bare -gt on a non-numeric value aborts the daemon under set -u, and
+    # systemd restarts it straight back into the same failure.
+    write_config <<'EOF'
+VM_IDS="100"
+CPU_IDLE_THRESHOLD=fifteen
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "CPU_IDLE_THRESHOLD must be a non-negative integer"
+}
+
+test_missing_instance_is_a_config_error() {
+    write_config <<'EOF'
+VM_IDS="999"
+EOF
+    export MOCK_MISSING_IDS="999"
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"  "$rc" "78"
+    assert_contains "names the VM"    "$out" "VM 999 does not exist"
+}
+
+test_container_hibernate_annotated_in_status() {
+    write_config <<'EOF'
+CONTAINER_IDS="200"
+CONTAINER_200_SLEEP_ACTION=hibernate
+EOF
+    export MOCK_PCT_STATUS_200=running
+
+    local out; out="$(manager status)"
+    assert_contains "warns LXC cannot hibernate" "$out" "not supported for LXC"
+}
+
 test_failed_resume_keeps_state_for_retry() {
     # The state file is the only record of what still needs starting. Clearing
     # it after a failed resume left the VM stopped with no way to retry, and
@@ -924,7 +1048,8 @@ VM_IDS="100"
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
 EOF
     export MOCK_QM_STATUS_100=stopped
-    export MOCK_RUNNING_PROCS="unattended-upgrade"
+    # comm here is "python3"; only the full command line carries the real name.
+    export MOCK_RUNNING_PROCS="/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade"
 
     local out; out="$(monitor check)"
     assert_contains "long name still detected" "$out" "Host Blocking Processes: DETECTED"
@@ -1050,11 +1175,27 @@ VM_IDS="100"
 VM_100_SLEEP_ACTION="hibernate"
 EOF
     export MOCK_QM_STATUS_100=running
-    export MOCK_RUNNING_PROCS="kvm"
+    export MOCK_RUNNING_PROCS="/usr/bin/kvm -id 100 -name win11 -pidfile /var/run/qemu-server/100.pid"
     export HIBERNATE_TIMEOUT=60
 
     local out; out="$(manager pre-sleep)"
     assert_contains "guard notices the process" "$out" "still exists, continuing to wait"
+}
+
+test_other_vms_process_does_not_block_confirmation() {
+    # The guard must key on this VM's id. Matching any running guest would stall
+    # every hibernate on a host with a second VM up.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="hibernate"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_RUNNING_PROCS="/usr/bin/kvm -id 101 -name other -pidfile /var/run/qemu-server/101.pid"
+    export HIBERNATE_TIMEOUT=60
+
+    local out; out="$(manager pre-sleep)"
+    assert_contains     "confirms promptly"   "$out" "hibernation confirmed complete"
+    assert_not_contains "does not stall"      "$out" "still exists, continuing to wait"
 }
 
 test_bad_sleep_action_is_a_config_error() {
@@ -1167,6 +1308,15 @@ run_test "config/no-instances"                   test_no_instances_configured_is
 run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_config_error
 run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
 run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
+run_test "cycle/failed-resume-survives-cycle"    test_failed_resume_survives_next_sleep_cycle
+run_test "cycle/post-wake-reports-failure"       test_post_wake_reports_failure
+run_test "cycle/other-vm-process-ignored"        test_other_vms_process_does_not_block_confirmation
+run_test "legacy/explicit-setting-wins"          test_explicit_per_instance_setting_beats_legacy_shim
+run_test "flags/non-numeric-ssh-flag"            test_non_numeric_ssh_flag_still_checks
+run_test "config/bad-host-flag"                  test_bad_host_flag_is_a_config_error
+run_test "config/non-numeric-threshold"          test_non_numeric_threshold_is_a_config_error
+run_test "config/missing-instance"               test_missing_instance_is_a_config_error
+run_test "config/ct-hibernate-annotated"         test_container_hibernate_annotated_in_status
 run_test "cycle/duplicate-ids-acted-once"        test_duplicate_ids_acted_on_once
 run_test "host/long-blocking-process-name"       test_long_host_blocking_process_is_matched
 run_test "config/invalid-action-names-fallback"  test_invalid_action_status_names_the_fallback

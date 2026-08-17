@@ -45,9 +45,14 @@ get_cfg() {
     printf '%s\n' "${val:-$default}"
 }
 
-# Hydrate legacy single-VM config into the multi-instance form when needed.
-# If the user's config still sets only the old VMID= / VM_NAME= / GAMING_PROCESSES=
-# variables and no VM_IDS / CONTAINER_IDS, synthesize a single VM entry.
+# Synthesize a legacy default only where the user has said nothing. An explicit
+# VM_<id>_* in a half-migrated config must win over the shim.
+set_if_unset() {
+    local name="$1" value="$2"
+    [[ -n "${!name+x}" ]] && return 0
+    printf -v "$name" '%s' "$value"
+}
+
 # Drop repeated IDs from the named variable, preserving order. Walking one
 # twice makes the second pass overwrite the state the first recorded, leaving
 # the instance stopped on wake. This process never validates its config, so the
@@ -69,13 +74,13 @@ hydrate_legacy_config() {
     # its VMID= entry, not lose the VM because a container appeared.
     if [[ -z "$VM_IDS" && -n "${VMID:-}" ]]; then
         VM_IDS="$VMID"
-        printf -v "VM_${VMID}_NAME"            '%s' "${VM_NAME:-windows-vm}"
-        printf -v "VM_${VMID}_MONITOR"         '%s' "1"
-        printf -v "VM_${VMID}_SLEEP_ACTION"    '%s' "hibernate"
-        printf -v "VM_${VMID}_RESUME_ON_WAKE"  '%s' "1"
-        printf -v "VM_${VMID}_GAMING_PROCESSES" '%s' "${GAMING_PROCESSES:-}"
-        printf -v "VM_${VMID}_CHECK_POWER_REQUESTS" '%s' "1"
-        printf -v "VM_${VMID}_CHECK_USER_IDLE" '%s' "1"
+        set_if_unset "VM_${VMID}_NAME"                 "${VM_NAME:-windows-vm}"
+        set_if_unset "VM_${VMID}_MONITOR"              "1"
+        set_if_unset "VM_${VMID}_SLEEP_ACTION"         "hibernate"
+        set_if_unset "VM_${VMID}_RESUME_ON_WAKE"       "1"
+        set_if_unset "VM_${VMID}_GAMING_PROCESSES"     "${GAMING_PROCESSES:-}"
+        set_if_unset "VM_${VMID}_CHECK_POWER_REQUESTS" "1"
+        set_if_unset "VM_${VMID}_CHECK_USER_IDLE"      "1"
     fi
     dedupe_ids VM_IDS
     dedupe_ids CONTAINER_IDS
@@ -113,6 +118,36 @@ guest_agent_ready() {
 
 # --- State file helpers -----------------------------------------------------
 
+# Entries from the previous cycle that were never resumed, keyed by state key.
+declare -A PENDING_STATE=()
+
+load_pending_state() {
+    PENDING_STATE=()
+    [[ -f "$STATE_FILE" ]] || return 0
+    local line key value
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$value" in
+            hibernated|shutdown|was_shutdown) PENDING_STATE["$key"]="$value" ;;
+        esac
+    done < "$STATE_FILE"
+}
+
+# An instance that is already stopped may be one an earlier cycle stopped and
+# failed to resume. Recording not_running would mean "leave it stopped" and
+# destroy the only record that it still needs starting.
+state_set_stopped() {
+    local key="$1" pending="${PENDING_STATE[$1]:-}"
+    if [[ -n "$pending" ]]; then
+        log "$key is still awaiting resume from an earlier cycle; keeping '$pending'"
+        state_set "$key" "$pending"
+    else
+        state_set "$key" "not_running"
+    fi
+}
+
 state_set() {
     # Upsert key=value into state file. Removes any prior entry for the same
     # key before appending the new value, so each instance has exactly one
@@ -136,7 +171,7 @@ hibernate_vm() {
 
     if ! vm_is_running "$id"; then
         log "VM $id not running, nothing to hibernate"
-        state_set "vm_${id}" "not_running"
+        state_set_stopped "vm_${id}"
         return 0
     fi
 
@@ -214,7 +249,7 @@ shutdown_vm() {
 
     if ! vm_is_running "$id"; then
         log "VM $id not running, nothing to do"
-        state_set "vm_${id}" "not_running"
+        state_set_stopped "vm_${id}"
         return 0
     fi
 
@@ -241,7 +276,7 @@ shutdown_ct() {
 
     if ! ct_is_running "$id"; then
         log "Container $id not running, nothing to do"
-        state_set "ct_${id}" "not_running"
+        state_set_stopped "ct_${id}"
         return 0
     fi
 
@@ -311,6 +346,11 @@ resume_instance() {
 
 pre_sleep() {
     log "=== PRE-SLEEP HOOK TRIGGERED ==="
+
+    # Read what the last cycle left behind before truncating: an instance we
+    # stopped and failed to resume is still stopped now, and must not be
+    # rewritten as not_running.
+    load_pending_state
 
     # Truncate state file — one fresh record per sleep cycle
     : > "$STATE_FILE"
@@ -430,8 +470,10 @@ post_wake() {
                 # Off only when explicitly 0, so a typo resumes the instance
                 # rather than leaving the user's session stopped.
                 if [[ "$resume_flag" != "0" ]]; then
+                    # Not $? — inside `if !` that is the status of the negation,
+                    # which is always 0.
                     if ! resume_instance "$kind" "$id"; then
-                        overall_rc=$?
+                        overall_rc=1
                         unresumed+=("$line")
                     fi
                 else
@@ -477,12 +519,20 @@ resume_all() {
     post_wake
 }
 
-# Annotate an unrecognised sleep action rather than printing it as configured.
-# $2 is the fallback pre_sleep will actually apply, which differs by kind.
+# Print the configured action alongside what pre_sleep will actually do, which
+# differs by kind: LXC cannot hibernate, and an unrecognised value falls back to
+# the kind's default rather than being left alone.
 describe_action() {
-    case "$1" in
-        hibernate|shutdown|keep_running|ignore) printf '%s\n' "$1" ;;
-        *) printf '%s (INVALID — will fall back to %s)\n' "$1" "$2" ;;
+    local action="$1" kind="$2"
+    case "$kind:$action" in
+        ct:hibernate)
+            printf 'hibernate (not supported for LXC — will shut down instead)\n' ;;
+        *:hibernate|*:shutdown|*:keep_running|*:ignore)
+            printf '%s\n' "$action" ;;
+        ct:*)
+            printf '%s (INVALID — will fall back to shutdown)\n' "$action" ;;
+        *)
+            printf '%s (INVALID — will fall back to hibernate)\n' "$action" ;;
     esac
 }
 
@@ -509,7 +559,7 @@ status() {
         else
             echo "  Status:        STOPPED"
         fi
-        echo "  Sleep action:  $(describe_action "$action" hibernate)"
+        echo "  Sleep action:  $(describe_action "$action" vm)"
         echo "  Resume on wake: $resume"
         echo ""
     done
@@ -524,7 +574,7 @@ status() {
         else
             echo "  Status:        STOPPED"
         fi
-        echo "  Sleep action:  $(describe_action "$action" shutdown)"
+        echo "  Sleep action:  $(describe_action "$action" ct)"
         echo "  Resume on wake: $resume"
         echo ""
     done

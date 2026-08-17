@@ -36,6 +36,12 @@ cmd="${1:-}"; shift || true
 
 case "$cmd" in
     status)
+        # Real `pct status` fails for an ID that does not exist; validate_config
+        # relies on that, so the suite needs a way to express it.
+        if [[ ",${MOCK_MISSING_IDS:-}," == *",${1:-},"* ]]; then
+            echo "Configuration file 'nodes/test/lxc/${1:-}.conf' does not exist" >&2
+            exit 2
+        fi
         printf 'status: %s\n' "$(get_status "${1:-}")"
         ;;
 

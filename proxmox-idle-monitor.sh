@@ -58,6 +58,14 @@ get_cfg() {
 # ── Legacy shim ────────────────────────────────────────────────────────────────
 # If only the old VMID=... style config is present, synthesize one VM entry.
 
+# Synthesize a legacy default only where the user has said nothing. An explicit
+# VM_<id>_* in a half-migrated config must win over the shim.
+set_if_unset() {
+    local name="$1" value="$2"
+    [[ -n "${!name+x}" ]] && return 0
+    printf -v "$name" '%s' "$value"
+}
+
 # Drop repeated IDs from the named variable, preserving order. Walking one
 # twice makes the second pass overwrite the state the first recorded, leaving
 # the instance stopped on wake; sleep-now suspends without running
@@ -87,13 +95,13 @@ hydrate_legacy_config() {
         # GAMING_PROCESSES uses a different default expansion to tell "unset"
         # from "set to empty" — honour the existing pattern exactly.
         local legacy_gaming="${GAMING_PROCESSES-steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Battle.net.exe,origin.exe,upc.exe}"
-        printf -v "VM_${VMID}_NAME"                 '%s' "${VM_NAME:-windows-vm}"
-        printf -v "VM_${VMID}_MONITOR"              '%s' "1"
-        printf -v "VM_${VMID}_SLEEP_ACTION"         '%s' "hibernate"
-        printf -v "VM_${VMID}_RESUME_ON_WAKE"       '%s' "1"
-        printf -v "VM_${VMID}_GAMING_PROCESSES"     '%s' "$legacy_gaming"
-        printf -v "VM_${VMID}_CHECK_POWER_REQUESTS" '%s' "1"
-        printf -v "VM_${VMID}_CHECK_USER_IDLE"      '%s' "1"
+        set_if_unset "VM_${VMID}_NAME"                 "${VM_NAME:-windows-vm}"
+        set_if_unset "VM_${VMID}_MONITOR"              "1"
+        set_if_unset "VM_${VMID}_SLEEP_ACTION"         "hibernate"
+        set_if_unset "VM_${VMID}_RESUME_ON_WAKE"       "1"
+        set_if_unset "VM_${VMID}_GAMING_PROCESSES"     "$legacy_gaming"
+        set_if_unset "VM_${VMID}_CHECK_POWER_REQUESTS" "1"
+        set_if_unset "VM_${VMID}_CHECK_USER_IDLE"      "1"
     fi
     dedupe_ids VM_IDS
     dedupe_ids CONTAINER_IDS
@@ -175,6 +183,30 @@ validate_config() {
         errors=$((errors + 1))
     fi
 
+    # These reach bare -gt/-lt tests, which evaluate their operand
+    # arithmetically: a non-numeric word aborts the daemon under `set -u`, and
+    # systemd restarts it straight into the same failure.
+    local numeric nval
+    for numeric in CHECK_INTERVAL CPU_IDLE_THRESHOLD GPU_IDLE_THRESHOLD WAKE_GRACE_PERIOD; do
+        nval="${!numeric}"
+        if ! is_positive_int "$nval"; then
+            echo "ERROR: $numeric must be a non-negative integer (current: '$nval')" >&2
+            errors=$((errors + 1))
+        fi
+    done
+
+    # Host-level checks follow the same rule as the per-instance flags: off only
+    # when explicitly 0, and anything else is a typo that would silently drop a
+    # guard against an active user.
+    local hostflag hval
+    for hostflag in CHECK_SSH_SESSIONS CHECK_SLEEP_INHIBITORS; do
+        hval="${!hostflag}"
+        if [[ "$hval" != "0" && "$hval" != "1" ]]; then
+            echo "ERROR: $hostflag='$hval' must be 0 or 1" >&2
+            errors=$((errors + 1))
+        fi
+    done
+
     # hydrate_legacy_config already dropped these so no code path acts on an ID
     # twice, but the typo is still worth surfacing rather than silently fixing.
     if [[ -n "$DUPLICATE_IDS" ]]; then
@@ -203,6 +235,14 @@ validate_config() {
                 errors=$((errors + 1))
             fi
         done
+        local thr tval
+        for thr in CPU_IDLE_THRESHOLD GPU_IDLE_THRESHOLD; do
+            tval=$(get_cfg "VM_${id}_${thr}" "0")
+            if ! is_positive_int "$tval"; then
+                echo "ERROR: VM_${id}_${thr}='$tval' must be a non-negative integer" >&2
+                errors=$((errors + 1))
+            fi
+        done
     done
 
     for id in $CONTAINER_IDS; do
@@ -218,6 +258,13 @@ validate_config() {
             local ct_val; ct_val=$(get_cfg "CONTAINER_${id}_${flag}" "1")
             if [[ "$ct_val" != "0" && "$ct_val" != "1" ]]; then
                 echo "ERROR: CONTAINER_${id}_${flag}='$ct_val' must be 0 or 1" >&2
+                errors=$((errors + 1))
+            fi
+        done
+        for thr in CPU_IDLE_THRESHOLD GPU_IDLE_THRESHOLD; do
+            tval=$(get_cfg "CONTAINER_${id}_${thr}" "0")
+            if ! is_positive_int "$tval"; then
+                echo "ERROR: CONTAINER_${id}_${thr}='$tval' must be a non-negative integer" >&2
                 errors=$((errors + 1))
             fi
         done
@@ -637,7 +684,7 @@ inhibits_sleep() {
 }
 
 check_sleep_inhibitors() {
-    if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then
+    if ! is_enabled "$CHECK_SLEEP_INHIBITORS"; then
         debug "Sleep inhibitor detection disabled"
         return 1
     fi
@@ -661,7 +708,7 @@ check_sleep_inhibitors() {
 }
 
 get_sleep_inhibitors_detail() {
-    if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then echo "disabled"; return; fi
+    if ! is_enabled "$CHECK_SLEEP_INHIBITORS"; then echo "disabled"; return; fi
     local inhibitor_list
     inhibitor_list=$(systemd-inhibit --list --no-legend 2>/dev/null)
     if [[ -z "$inhibitor_list" ]]; then echo "none"; return; fi
@@ -789,7 +836,7 @@ is_system_idle() {
 
     # ── Host-level checks (always) ────────────────────────────────
 
-    if [[ "$CHECK_SSH_SESSIONS" == "1" ]] && has_active_ssh_sessions; then
+    if is_enabled "$CHECK_SSH_SESSIONS" && has_active_ssh_sessions; then
         debug "Active SSH sessions detected"
         return 1
     fi
@@ -1191,7 +1238,7 @@ check_once() {
 
     # ── Host-level ────────────────────────────────────────────────
     echo -n "SSH Sessions: "
-    if [[ "$CHECK_SSH_SESSIONS" != "1" ]]; then echo "DISABLED"
+    if ! is_enabled "$CHECK_SSH_SESSIONS"; then echo "DISABLED"
     elif has_active_ssh_sessions; then echo "YES"
     else echo "NO"
     fi
@@ -1214,7 +1261,7 @@ check_once() {
 
     echo ""
     echo -n "Sleep Inhibitors: "
-    if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then echo "DISABLED"
+    if ! is_enabled "$CHECK_SLEEP_INHIBITORS"; then echo "DISABLED"
     elif check_sleep_inhibitors; then
         echo "ACTIVE"
         get_sleep_inhibitors_detail | sed 's/^/  /'
