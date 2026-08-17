@@ -124,7 +124,7 @@ Per-instance settings use the naming convention `VM_<id>_<SETTING>` or `CONTAINE
 
 ### Legacy Compatibility
 
-If neither `VM_IDS` nor `CONTAINER_IDS` is set but the old `VMID=` variable is present, a **legacy shim** function (`hydrate_legacy_config`) synthesizes a single VM entry at startup. This means existing configs from before container support was added continue to work without modification.
+If `VM_IDS` is empty but the old `VMID=` variable is present, a **legacy shim** function (`hydrate_legacy_config`) synthesizes a single VM entry at startup. This means existing configs from before container support was added continue to work without modification, and remain so when the user adds `CONTAINER_IDS`.
 
 ### Sleep Decision
 
@@ -367,7 +367,7 @@ Scripts validate configuration at startup:
 | Scenario | Strategy |
 |----------|----------|
 | Guest agent unresponsive | Fall back to `qm shutdown` |
-| Hibernation timeout | Force shutdown, record `was_shutdown` state |
+| Hibernation timeout | Graceful `qm shutdown`, recorded as `shutdown`; force-stop and `was_shutdown` only if that also fails |
 | Container shutdown timeout | `pct stop` (force), record `was_shutdown` |
 | nvidia-smi unavailable (host) | Return -1 (no signal), don't block sleep |
 | `pct exec` fails | Return -1 / not found, don't block sleep |
@@ -429,8 +429,8 @@ See [TODO.md](../TODO.md) for detailed specifications on planned major enhanceme
 | `/usr/local/bin/proxmox-sleep-manager.sh` | Sleep manager script |
 | `/usr/local/bin/proxmox-idle-monitor.sh` | Idle monitor script |
 | `/etc/proxmox-sleep.conf` | Configuration file |
-| `/etc/systemd/system/proxmox-sleep-manager.service` | Sleep manager unit |
-| `/etc/systemd/system/proxmox-idle-monitor.service` | Idle monitor unit |
+| `/lib/systemd/system/proxmox-sleep-manager.service` | Sleep manager unit |
+| `/lib/systemd/system/proxmox-idle-monitor.service` | Idle monitor unit |
 | `/etc/logrotate.d/proxmox-sleep` | Log rotation config |
 | `/var/log/proxmox-sleep-manager.log` | Sleep manager log |
 | `/var/log/proxmox-idle-monitor.log` | Idle monitor log |

@@ -93,6 +93,11 @@ debug() {
 
 # ── Numeric helpers ────────────────────────────────────────────────────────────
 
+# A per-instance flag counts as off only when explicitly 0. Erring toward "on"
+# means a typo monitors and resumes an instance rather than silently skipping it
+# and leaving it stopped; validate_config rejects the typo at startup anyway.
+is_enabled() { [[ "$1" != "0" ]]; }
+
 is_positive_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_integer()      { [[ "$1" =~ ^-?[0-9]+$ ]]; }
 is_valid_metric() { is_integer "$1" && [[ "$1" != "-1" ]]; }
@@ -149,28 +154,56 @@ validate_config() {
         errors=$((errors + 1))
     fi
 
-    # An unrecognised action falls through to "leave it running", so a typo
-    # would suspend the host with a passthrough VM live. Refuse to start.
+    # A repeated ID is walked twice: the second pass sees the instance the
+    # first pass just stopped and overwrites its state with "not_running",
+    # so post_wake leaves it stopped.
+    local dupes
+    # shellcheck disable=SC2086  # the ID lists are space-separated on purpose
+    dupes=$(printf '%s\n' $VM_IDS $CONTAINER_IDS | sort | uniq -d | tr '\n' ' ')
+    if [[ -n "${dupes// /}" ]]; then
+        echo "ERROR: duplicate instance IDs in VM_IDS/CONTAINER_IDS: ${dupes% }" >&2
+        errors=$((errors + 1))
+    fi
+
+    # An unrecognised action falls through to a fallback, and an unrecognised
+    # flag to its safe branch — both mean the config does not do what it says.
+    # Refuse to start rather than run a misread config for weeks.
+    local kind_action
     for id in $VM_IDS; do
-        local vm_action; vm_action=$(get_cfg "VM_${id}_SLEEP_ACTION" "hibernate")
-        case "$vm_action" in
+        kind_action=$(get_cfg "VM_${id}_SLEEP_ACTION" "hibernate")
+        case "$kind_action" in
             hibernate|shutdown|keep_running|ignore) ;;
             *)
-                echo "ERROR: VM_${id}_SLEEP_ACTION='$vm_action' is not one of: hibernate, shutdown, keep_running, ignore" >&2
+                echo "ERROR: VM_${id}_SLEEP_ACTION='$kind_action' is not one of: hibernate, shutdown, keep_running, ignore" >&2
                 errors=$((errors + 1))
                 ;;
         esac
+        local flag
+        for flag in MONITOR RESUME_ON_WAKE CHECK_USER_IDLE CHECK_POWER_REQUESTS; do
+            local val; val=$(get_cfg "VM_${id}_${flag}" "1")
+            if [[ "$val" != "0" && "$val" != "1" ]]; then
+                echo "ERROR: VM_${id}_${flag}='$val' must be 0 or 1" >&2
+                errors=$((errors + 1))
+            fi
+        done
     done
 
     for id in $CONTAINER_IDS; do
-        local ct_action; ct_action=$(get_cfg "CONTAINER_${id}_SLEEP_ACTION" "shutdown")
-        case "$ct_action" in
+        kind_action=$(get_cfg "CONTAINER_${id}_SLEEP_ACTION" "shutdown")
+        case "$kind_action" in
             hibernate|shutdown|keep_running|ignore) ;;
             *)
-                echo "ERROR: CONTAINER_${id}_SLEEP_ACTION='$ct_action' is not one of: shutdown, keep_running, ignore (hibernate falls back to shutdown)" >&2
+                echo "ERROR: CONTAINER_${id}_SLEEP_ACTION='$kind_action' is not one of: shutdown, keep_running, ignore (hibernate falls back to shutdown)" >&2
                 errors=$((errors + 1))
                 ;;
         esac
+        for flag in MONITOR RESUME_ON_WAKE; do
+            local ct_val; ct_val=$(get_cfg "CONTAINER_${id}_${flag}" "1")
+            if [[ "$ct_val" != "0" && "$ct_val" != "1" ]]; then
+                echo "ERROR: CONTAINER_${id}_${flag}='$ct_val' must be 0 or 1" >&2
+                errors=$((errors + 1))
+            fi
+        done
     done
 
     if [[ $errors -gt 0 ]]; then
@@ -751,7 +784,7 @@ is_system_idle() {
     local id monitor
     for id in $VM_IDS; do
         monitor=$(get_cfg "VM_${id}_MONITOR" "1")
-        [[ "$monitor" != "1" ]] && continue
+        is_enabled "$monitor" || continue
 
         if ! vm_is_running "$id"; then
             debug "VM $id not running - idle for this instance"
@@ -789,7 +822,7 @@ is_system_idle() {
         # Combined with WAKE_GRACE_PERIOD in trigger_sleep, this still
         # prevents immediate re-sleep after wake.
         local check_user_idle; check_user_idle=$(get_cfg "VM_${id}_CHECK_USER_IDLE" "1")
-        if [[ "$check_user_idle" == "1" ]]; then
+        if is_enabled "$check_user_idle"; then
             local effective_idle; effective_idle=$(get_effective_idle_time "$id")
             debug "VM $id effective idle time: ${effective_idle}s"
             if is_valid_metric "$effective_idle" && [[ "$effective_idle" -lt "$CHECK_INTERVAL" ]]; then
@@ -806,7 +839,7 @@ is_system_idle() {
 
         # Power requests
         local check_power; check_power=$(get_cfg "VM_${id}_CHECK_POWER_REQUESTS" "1")
-        if [[ "$check_power" == "1" ]] && check_vm_power_requests "$id"; then
+        if is_enabled "$check_power" && check_vm_power_requests "$id"; then
             debug "Power requests active in VM $id"
             return 1
         fi
@@ -822,7 +855,7 @@ is_system_idle() {
     local ct_gpu_read=0
     for id in $CONTAINER_IDS; do
         monitor=$(get_cfg "CONTAINER_${id}_MONITOR" "1")
-        [[ "$monitor" != "1" ]] && continue
+        is_enabled "$monitor" || continue
 
         if ! ct_is_running "$id"; then
             debug "Container $id not running - idle for this instance"
@@ -1068,7 +1101,7 @@ check_once() {
             echo "  CPU Usage: $(get_vm_cpu_usage "$id")%"
 
             local check_user_idle; check_user_idle=$(get_cfg "VM_${id}_CHECK_USER_IDLE" "1")
-            if [[ "$check_user_idle" == "1" ]]; then
+            if is_enabled "$check_user_idle"; then
                 local win_idle; win_idle=$(get_windows_idle_time "$id")
                 local eff_idle; eff_idle=$(get_effective_idle_time "$id")
                 echo "  Windows Idle Time: ${win_idle}s"
@@ -1087,7 +1120,7 @@ check_once() {
 
             local check_power; check_power=$(get_cfg "VM_${id}_CHECK_POWER_REQUESTS" "1")
             echo -n "  Power Requests: "
-            if [[ "$check_power" != "1" ]]; then
+            if ! is_enabled "$check_power"; then
                 echo "DISABLED"
             elif check_vm_power_requests "$id"; then
                 echo "ACTIVE"
@@ -1167,6 +1200,13 @@ status() {
     check_once
 
     echo ""
+    # `status` never calls validate_config, so it has to survive a threshold
+    # the daemon would have refused to start on. Arithmetic on a non-numeric
+    # value aborts the whole subcommand under `set -u`.
+    if ! is_positive_int "$IDLE_THRESHOLD_MINUTES"; then
+        echo "Auto-sleep: MISCONFIGURED (IDLE_THRESHOLD_MINUTES='$IDLE_THRESHOLD_MINUTES' is not a non-negative integer)"
+        return
+    fi
     # record_idle_state() bails out at this threshold, so no tracking ever
     # starts — report that instead of a countdown that will not happen.
     if [[ "$IDLE_THRESHOLD_MINUTES" -le 0 ]]; then
@@ -1174,8 +1214,13 @@ status() {
         return
     fi
     if is_system_idle; then
-        if [[ -f "$STATE_FILE" ]]; then
-            local idle_start; idle_start=$(cat "$STATE_FILE")
+        local idle_start=""
+        [[ -f "$STATE_FILE" ]] && idle_start=$(cat "$STATE_FILE")
+        # Same guard the daemon path applies: a corrupt or empty state file
+        # must not abort `status` under `set -u`, nor print a bogus countdown.
+        if [[ -n "$idle_start" ]] && ! is_positive_int "$idle_start"; then
+            echo "Idle Tracking: state file is corrupt, will reset on next check"
+        elif [[ -n "$idle_start" ]]; then
             local current_time; current_time=$(date +%s)
             local idle_duration=$(( (current_time - idle_start) / 60 ))
             echo "Idle Tracking: Counting down - ${idle_duration}/${IDLE_THRESHOLD_MINUTES} minutes"

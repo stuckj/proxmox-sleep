@@ -47,7 +47,9 @@ fi
 
 VM_NAME=""
 if [[ -n "$VMID" ]] && qm status "$VMID" &>/dev/null; then
-    VM_NAME=$(qm config "$VMID" | grep "^name:" | awk '{print $2}')
+    # `name:` is optional in a VM config; without || true the failing grep
+    # would abort the installer under `set -e` before the :- fallback runs.
+    VM_NAME=$(qm config "$VMID" | grep "^name:" | awk '{print $2}' || true)
     VM_NAME=${VM_NAME:-windows-vm}
     echo -e "${GREEN}Found VM: $VM_NAME (ID: $VMID)${NC}"
 elif [[ -n "$VMID" ]]; then
@@ -65,7 +67,7 @@ fi
 
 CT_NAME=""
 if [[ -n "$CTID" ]] && pct status "$CTID" &>/dev/null; then
-    CT_NAME=$(pct config "$CTID" | grep "^hostname:" | awk '{print $2}')
+    CT_NAME=$(pct config "$CTID" | grep "^hostname:" | awk '{print $2}' || true)
     CT_NAME=${CT_NAME:-linux-ct}
     echo -e "${GREEN}Found container: $CT_NAME (ID: $CTID)${NC}"
 elif [[ -n "$CTID" ]]; then

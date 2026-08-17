@@ -888,6 +888,101 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_unknown_sleep_action_falls_back_safely() {
+    # pre_sleep runs in a process that never validates config, so an unknown
+    # action must still stop the VM. It used to record "ignored" and leave a
+    # passthrough VM running while the host suspended.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION=hibernte
+EOF
+    export MOCK_QM_STATUS_100=running
+    export HIBERNATE_TIMEOUT=60
+
+    local out; out="$(manager pre-sleep)"
+    assert_contains     "warns about the typo" "$out" "unknown VM_100_SLEEP_ACTION='hibernte'"
+    assert_contains     "hibernates anyway"    "$(calls)" "shutdown /h"
+    assert_contains     "state records it"     "$(read_state)" "vm_100=hibernated"
+    assert_not_contains "not left running"     "$(read_state)" "vm_100=ignored"
+}
+
+test_non_numeric_monitor_flag_still_monitors() {
+    # Off only when explicitly 0. MONITOR=yes used to skip the VM entirely,
+    # so the host slept through an active gaming session.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_MONITOR=yes
+VM_100_GAMING_PROCESSES="steam.exe"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_VM_PROCS_100=$'explorer\nsteam'
+
+    local out; out="$(monitor check)"
+    assert_contains "gaming still detected" "$out" "Gaming Processes: DETECTED"
+    assert_contains "blocks sleep"          "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_non_numeric_resume_flag_still_resumes() {
+    # RESUME_ON_WAKE=true used to mean "leave it stopped" — the user's session
+    # never came back.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+VM_100_RESUME_ON_WAKE=true
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    : > "$MOCK_CALL_LOG"
+    manager post-wake > /dev/null
+
+    assert_contains "VM is resumed" "$(calls)" "qm start 100"
+}
+
+test_duplicate_instance_ids_are_a_config_error() {
+    # The second pass over a repeated ID overwrote the real state with
+    # not_running, so post_wake left the instance stopped.
+    write_config <<'EOF'
+VM_IDS="100 100"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG" "$rc" "78"
+    assert_contains "names the dupe"  "$out" "duplicate instance IDs"
+}
+
+test_corrupt_idle_state_does_not_break_status() {
+    write_config <<'EOF'
+VM_IDS="100"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+
+    mkdir -p "$PROXMOX_SLEEP_STATE_DIR"
+    echo "garbage" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.state"
+
+    local out rc
+    out="$(bash "$MONITOR" status 2>&1)"; rc=$?
+    assert_rc "status still succeeds" "$rc" "0"
+    assert_contains "reports corruption" "$out" "state file is corrupt"
+}
+
+test_lingering_guest_process_blocks_hibernate_confirmation() {
+    # The confirmation guard greps for the running guest process. Proxmox
+    # names it `kvm`, so a qemu-only pattern made this a no-op.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="hibernate"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_RUNNING_PROCS="kvm"
+    export HIBERNATE_TIMEOUT=60
+
+    local out; out="$(manager pre-sleep)"
+    assert_contains "guard notices the process" "$out" "still exists, continuing to wait"
+}
+
 test_bad_sleep_action_is_a_config_error() {
     # An unrecognised action used to fall through to "ignore", leaving a
     # passthrough VM running while the host suspended.
@@ -996,6 +1091,12 @@ run_test "wake/effective-idle-clamped"           test_effective_idle_clamped_to_
 
 run_test "config/no-instances"                   test_no_instances_configured_is_a_config_error
 run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_config_error
+run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
+run_test "cycle/lingering-guest-process"         test_lingering_guest_process_blocks_hibernate_confirmation
+run_test "flags/non-numeric-monitor"             test_non_numeric_monitor_flag_still_monitors
+run_test "flags/non-numeric-resume"              test_non_numeric_resume_flag_still_resumes
+run_test "config/duplicate-ids"                  test_duplicate_instance_ids_are_a_config_error
+run_test "config/corrupt-idle-state-status"      test_corrupt_idle_state_does_not_break_status
 run_test "config/bad-sleep-action"               test_bad_sleep_action_is_a_config_error
 run_test "config/invalid-action-in-status"       test_invalid_sleep_action_flagged_in_status
 run_test "config/threshold-zero-disables"        test_zero_idle_threshold_status_reports_disabled

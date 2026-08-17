@@ -216,7 +216,7 @@ CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,proton,game
 
 ### Legacy Format (Backward Compatible)
 
-If you set only `VMID=` and no `VM_IDS` / `CONTAINER_IDS`, the scripts automatically synthesize a single VM entry with legacy defaults. Existing configs continue to work without changes.
+If `VM_IDS` is empty and the old `VMID=` is set, the scripts automatically synthesize a single VM entry with legacy defaults. Existing configs continue to work without changes, including after you add `CONTAINER_IDS` — adding a container does not disturb the legacy VM entry.
 
 ```bash
 VMID=100

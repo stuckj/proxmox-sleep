@@ -158,7 +158,11 @@ hibernate_vm() {
             consecutive_stopped=$((consecutive_stopped + 1))
             log "VM $id not running (check $consecutive_stopped of $required_stopped)"
             if [[ $consecutive_stopped -ge $required_stopped ]]; then
-                if ! pgrep -f "qemu.*-id $id " > /dev/null 2>&1; then
+                # Proxmox execs the guest as `kvm`, not `qemu`, and the only
+                # literal "qemu" on its command line (the qemu-server socket
+                # paths) comes after -id — so a qemu-anchored pattern cannot
+                # match and this guard would silently never fire.
+                if ! pgrep -f "(qemu|kvm).*-id $id " > /dev/null 2>&1; then
                     log "VM $id hibernation confirmed complete (took ${waited}s)"
                     return 0
                 else
@@ -315,8 +319,12 @@ pre_sleep() {
                 state_set "vm_${id}" "ignored"
                 ;;
             *)
-                log "WARN: unknown VM_${id}_SLEEP_ACTION='$action' — ignoring"
-                state_set "vm_${id}" "ignored"
+                # Fall back to the documented default, not to "ignore": this
+                # process re-reads the config on every invocation and never
+                # validates it, so a typo must not leave the VM running while
+                # the host suspends.
+                log "WARN: unknown VM_${id}_SLEEP_ACTION='$action' — falling back to hibernate"
+                hibernate_vm "$id" || overall_rc=$?
                 ;;
         esac
     done
@@ -340,8 +348,8 @@ pre_sleep() {
                 state_set "ct_${id}" "ignored"
                 ;;
             *)
-                log "WARN: unknown CONTAINER_${id}_SLEEP_ACTION='$action' — ignoring"
-                state_set "ct_${id}" "ignored"
+                log "WARN: unknown CONTAINER_${id}_SLEEP_ACTION='$action' — falling back to shutdown"
+                shutdown_ct "$id" || overall_rc=$?
                 ;;
         esac
     done
@@ -402,10 +410,12 @@ post_wake() {
 
         case "$value" in
             hibernated|shutdown|was_shutdown)
-                if [[ "$resume_flag" == "1" ]]; then
+                # Off only when explicitly 0, so a typo resumes the instance
+                # rather than leaving the user's session stopped.
+                if [[ "$resume_flag" != "0" ]]; then
                     resume_instance "$kind" "$id" || overall_rc=$?
                 else
-                    log "$kind $id: RESUME_ON_WAKE=0, leaving stopped"
+                    log "$kind $id: RESUME_ON_WAKE=$resume_flag, leaving stopped"
                 fi
                 ;;
             not_running)

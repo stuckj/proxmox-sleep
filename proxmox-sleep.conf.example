@@ -5,8 +5,9 @@
 # independently — the system only sleeps when *all* monitored instances
 # are idle AND host-level checks pass.
 #
-# Backward compatibility: if you set only VMID= (and no VM_IDS / CONTAINER_IDS),
-# the scripts treat it as a single Windows VM with legacy defaults.
+# Backward compatibility: if VM_IDS is empty and VMID= is set, the scripts treat
+# it as a single Windows VM with legacy defaults. Adding CONTAINER_IDS does not
+# disable it — the shim keys on VM_IDS alone.
 
 ###############################################################################
 # Global settings
@@ -147,7 +148,7 @@ VM_100_CHECK_USER_IDLE=1
 ###############################################################################
 # Legacy single-VM format (backward compatible)
 ###############################################################################
-# If VM_IDS and CONTAINER_IDS are both empty, these are used instead:
+# If VM_IDS is empty, these are used instead (CONTAINER_IDS may still be set):
 #
 # VMID=100
 # VM_NAME="windows"
