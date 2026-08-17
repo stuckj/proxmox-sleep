@@ -40,6 +40,7 @@ GPU_IDLE_THRESHOLD="${GPU_IDLE_THRESHOLD:-$DEFAULT_GPU_IDLE_THRESHOLD}"
 CPU_IDLE_THRESHOLD="${CPU_IDLE_THRESHOLD:-$DEFAULT_CPU_IDLE_THRESHOLD}"
 GPU_VENDOR="${GPU_VENDOR:-auto}"
 CHECK_SSH_SESSIONS="${CHECK_SSH_SESSIONS:-1}"
+DEBUG="${DEBUG:-0}"
 WAKE_GRACE_PERIOD="${WAKE_GRACE_PERIOD:-60}"
 LOG_FILE="${IDLE_MONITOR_LOG:-/var/log/proxmox-idle-monitor.log}"
 
@@ -134,7 +135,7 @@ log() {
 }
 
 debug() {
-    if [[ "${DEBUG:-0}" == "1" ]]; then
+    if is_enabled "$DEBUG"; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - DEBUG: $1" >> "$LOG_FILE"
     fi
 }
@@ -257,7 +258,7 @@ validate_config() {
     # when explicitly 0, and anything else is a typo that would silently drop a
     # guard against an active user.
     local hostflag hval
-    for hostflag in CHECK_SSH_SESSIONS CHECK_SLEEP_INHIBITORS; do
+    for hostflag in CHECK_SSH_SESSIONS CHECK_SLEEP_INHIBITORS DEBUG; do
         hval="${!hostflag}"
         if [[ "$hval" != "0" && "$hval" != "1" ]]; then
             echo "ERROR: $hostflag='$hval' must be 0 or 1" >&2

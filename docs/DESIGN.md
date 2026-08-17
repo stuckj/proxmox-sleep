@@ -350,12 +350,11 @@ a systemd sleep hook, re-reads the config on every invocation and validates
 nothing — it must act on whatever it finds, so unrecognised values fall back to
 the safe default rather than aborting the suspend.
 
-`proxmox-idle-monitor.sh start` validates:
-- All listed VM IDs exist (`qm status`)
-- All listed container IDs exist (`pct status`)
-- At least one VM or container is configured
-- `IDLE_THRESHOLD_MINUTES` is a non-negative integer
-- Invalid config exits with `EX_CONFIG` (78), preventing systemd restart loops
+`proxmox-idle-monitor.sh start` checks the instances exist and every setting is
+in range before entering its loop; `validate_config` is the authority on the
+rules. Invalid config exits with `EX_CONFIG` (78), which the unit's
+`RestartPreventExitStatus` treats as terminal rather than restarting into the
+same failure.
 
 ---
 

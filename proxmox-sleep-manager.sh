@@ -51,6 +51,24 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
+# A non-numeric timeout makes `[[ $waited -lt $HIBERNATE_TIMEOUT ]]` false on the
+# first pass, so the confirmation loop never runs and control drops into the
+# timeout branch — stopping a guest that was just told to hibernate. The idle
+# monitor rejects these at daemon start, but sleep-now, a hand-run pre-sleep and
+# a manual `systemctl suspend` never go through it, so fall back here too.
+sanitize_number() {
+    local name="$1" pattern="$2" fallback="$3"
+    # Separate statement: within a single `local`, ${!name} resolves before
+    # name is assigned.
+    local value="${!name}"
+    [[ "$value" =~ $pattern ]] && return 0
+    log "WARN: $name='$value' is not valid; using $fallback"
+    printf -v "$name" '%s' "$fallback"
+}
+sanitize_number HIBERNATE_TIMEOUT '^[1-9][0-9]*$' 300
+sanitize_number SHUTDOWN_TIMEOUT  '^[1-9][0-9]*$' 120
+sanitize_number WAKE_DELAY        '^[0-9]+$'      5
+
 # Read a config var with a default (uses bash indirect expansion)
 get_cfg() {
     local var="$1" default="${2:-}"
@@ -160,6 +178,21 @@ state_set_stopped() {
     else
         state_set "$key" "not_running"
     fi
+}
+
+# keep_running and ignore mean "do not touch it this cycle". If an earlier cycle
+# stopped the instance and never got it back, its pending record is the only note
+# that it still owes the user a start, and must outlive a cycle that leaves it
+# alone — otherwise post_wake reads "no action" and it stays down for good.
+state_set_untouched() {
+    local kind="$1" id="$2" value="$3"
+    local key="${kind}_${id}" pending="${PENDING_STATE[${1}_${2}]:-}"
+    if [[ -n "$pending" ]] && ! instance_is_running "$kind" "$id"; then
+        log "$key is still awaiting resume from an earlier cycle; keeping '$pending'"
+        state_set "$key" "$pending"
+        return
+    fi
+    state_set "$key" "$value"
 }
 
 state_set() {
@@ -382,11 +415,11 @@ pre_sleep() {
                 ;;
             keep_running)
                 log "VM $id: sleep_action=keep_running"
-                state_set "vm_${id}" "kept_running"
+                state_set_untouched vm "$id" "kept_running"
                 ;;
             ignore)
                 log "VM $id: sleep_action=ignore"
-                state_set "vm_${id}" "ignored"
+                state_set_untouched vm "$id" "ignored"
                 ;;
             *)
                 # Fall back to the documented default, not to "ignore": this
@@ -411,11 +444,11 @@ pre_sleep() {
                 ;;
             keep_running)
                 log "Container $id: sleep_action=keep_running"
-                state_set "ct_${id}" "kept_running"
+                state_set_untouched ct "$id" "kept_running"
                 ;;
             ignore)
                 log "Container $id: sleep_action=ignore"
-                state_set "ct_${id}" "ignored"
+                state_set_untouched ct "$id" "ignored"
                 ;;
             *)
                 log "WARN: unknown CONTAINER_${id}_SLEEP_ACTION='$action' — falling back to shutdown"

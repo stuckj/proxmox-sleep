@@ -277,9 +277,11 @@ EOF
     assert_contains "VM state recorded" "$st" "vm_100=shutdown"
     assert_contains "CT state recorded" "$st" "ct_200=shutdown"
 
+    # Assert the full argv: SHUTDOWN_TIMEOUT is documented and validated, so it
+    # has to actually reach qm/pct, not just be computed.
     local c; c="$(calls)"
-    assert_contains "qm shutdown issued"  "$c" "qm shutdown 100"
-    assert_contains "pct shutdown issued" "$c" "pct shutdown 200"
+    assert_contains "qm shutdown issued"  "$c" "qm shutdown 100 --timeout 120"
+    assert_contains "pct shutdown issued" "$c" "pct shutdown 200 --timeout 120"
 }
 
 test_full_cycle_resumes_both() {
@@ -903,6 +905,110 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_pending_resume_survives_keep_running_cycle() {
+    # keep_running/ignore mean "leave it alone this cycle" — they must not erase
+    # the record that an earlier cycle stopped it and never got it back.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    export MOCK_QM_START_RC_100=1
+    manager post-wake > /dev/null
+    assert_contains "pending after failed resume" "$(read_state)" "vm_100=shutdown"
+
+    # User edits the config between cycles.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="ignore"
+EOF
+    manager pre-sleep > /dev/null
+    assert_contains     "pending preserved"  "$(read_state)" "vm_100=shutdown"
+    assert_not_contains "not overwritten"    "$(read_state)" "vm_100=ignored"
+
+    unset MOCK_QM_START_RC_100
+    : > "$MOCK_CALL_LOG"
+    manager post-wake > /dev/null
+    assert_contains "still recovers" "$(calls)" "qm start 100"
+}
+
+test_running_instance_still_records_kept_running() {
+    # The carry-forward must not swallow the ordinary case.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="keep_running"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    assert_contains "records kept_running" "$(read_state)" "vm_100=kept_running"
+}
+
+test_manager_clamps_bad_hibernate_timeout() {
+    # sleep-now and a hand-run pre-sleep never pass through validate_config, so
+    # the manager has to fall back itself. Otherwise the confirmation loop runs
+    # zero times and qm shutdown hits a guest mid-hibernate.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="hibernate"
+HIBERNATE_TIMEOUT=600s
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out; out="$(manager pre-sleep)"
+    assert_contains "warns about the value"  "$out" "HIBERNATE_TIMEOUT='600s' is not valid"
+    assert_contains "loop actually polls"    "$out" "check 1 of 3"
+    assert_contains "hibernation confirmed"  "$out" "hibernation confirmed complete"
+}
+
+test_check_survives_non_numeric_thresholds() {
+    # check/status never call validate_config, so a threshold the daemon would
+    # refuse to start on must not abort them partway through the report.
+    write_config <<'EOF'
+VM_IDS="100"
+CPU_IDLE_THRESHOLD=fifteen
+GPU_IDLE_THRESHOLD=ten
+CHECK_INTERVAL=60s
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" check 2>&1)"; rc=$?
+    assert_rc "check still succeeds" "$rc" "0"
+    assert_contains "report is complete" "$out" "Overall Idle Status:"
+}
+
+test_bad_debug_flag_is_a_config_error() {
+    write_config <<'EOF'
+VM_IDS="100"
+DEBUG=true
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "DEBUG='true' must be 0 or 1"
+}
+
+test_threshold_zero_never_suspends() {
+    # 0 disables auto-sleep. Asserted at the daemon, not just via the status
+    # string, which comes from a different branch entirely.
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=0
+CHECK_INTERVAL=1
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    seed_idle_minutes 30
+
+    run_monitor_briefly
+    assert_contains     "loop actually ran" "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold: 0 minutes"
+    assert_not_contains "never suspends"    "$(calls)" "systemctl suspend"
+}
+
 test_environment_overrides_config_file() {
     # The config file is sourced, which assigns — so without a snapshot it would
     # win over the environment and `DEBUG=1 ... check` would do nothing against
@@ -1186,6 +1292,8 @@ VMID=100
 VM_NAME="win"
 VM_100_SLEEP_ACTION=keep_running
 VM_100_RESUME_ON_WAKE=0
+VM_100_MONITOR=0
+VM_100_GAMING_PROCESSES=""
 EOF
     export MOCK_QM_STATUS_100=running
 
@@ -1195,6 +1303,12 @@ EOF
     manager pre-sleep > /dev/null
     assert_contains     "left running"    "$(read_state)" "vm_100=kept_running"
     assert_not_contains "not hibernated"  "$(calls)"      "shutdown /h"
+
+    # The monitor keeps its own copy of the shim, and owns the settings the
+    # manager never reads.
+    local mout; mout="$(monitor check)"
+    assert_contains "monitor honours MONITOR=0"      "$mout" "[monitor=0]"
+    assert_contains "monitor honours empty gaming"   "$mout" "Gaming Processes: DISABLED"
 }
 
 test_non_numeric_ssh_flag_still_checks() {
@@ -1558,6 +1672,12 @@ run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_co
 run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
 run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
 run_test "cycle/failed-resume-survives-cycle"    test_failed_resume_survives_next_sleep_cycle
+run_test "cycle/pending-survives-keep-running"   test_pending_resume_survives_keep_running_cycle
+run_test "cycle/running-records-kept-running"    test_running_instance_still_records_kept_running
+run_test "cycle/manager-clamps-bad-timeout"      test_manager_clamps_bad_hibernate_timeout
+run_test "config/check-survives-bad-thresholds"  test_check_survives_non_numeric_thresholds
+run_test "config/bad-debug-flag"                 test_bad_debug_flag_is_a_config_error
+run_test "sleep/threshold-zero-never-suspends"   test_threshold_zero_never_suspends
 run_test "config/env-overrides-config"           test_environment_overrides_config_file
 run_test "sleep/declined-keeps-wake-time"        test_declined_sleep_does_not_restamp_wake_time
 run_test "config/bad-hibernate-timeout"          test_bad_hibernate_timeout_is_a_config_error
