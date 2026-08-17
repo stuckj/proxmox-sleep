@@ -156,7 +156,7 @@ ct_200=shutdown
 vm_101=not_running
 ```
 
-Post-wake reads the file and starts any instance whose state is `hibernated`, `shutdown`, or `was_shutdown` — but only if its `RESUME_ON_WAKE=1`. Instances with `not_running`, `kept_running`, or `ignored` are left as-is.
+Post-wake reads the file and starts any instance whose state is `hibernated`, `shutdown`, or `was_shutdown`, unless `RESUME_ON_WAKE` is turned off for it. Instances with `not_running`, `kept_running`, or `ignored` are left as-is.
 
 ---
 
@@ -270,7 +270,7 @@ Host Script ──> pvesh get /nodes/{node}/qemu/{vmid}/status/current   (VM CPU
 
 | File | Purpose | Lifecycle |
 |------|---------|-----------|
-| `/run/proxmox-sleep/sleep-manager.state` | Instance states before sleep (key=value, one per line) | Created pre-sleep, read post-wake, deleted after use |
+| `/run/proxmox-sleep/sleep-manager.state` | Instance states before sleep (key=value, one per line) | Created pre-sleep, read post-wake, cleared once everything is back up |
 | `/run/proxmox-sleep/idle-monitor.state` | Idle timer start timestamp | Created when idle begins, deleted when active |
 | `/run/proxmox-sleep/idle-monitor.wake` | Last wake timestamp | Created post-wake, used for grace period |
 

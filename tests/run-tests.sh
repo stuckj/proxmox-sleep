@@ -70,6 +70,19 @@ calls() { cat "$MOCK_CALL_LOG" 2>/dev/null || true; }
 with_nvidia() { export PATH="$MOCKS/optional:$PATH"; }
 
 monitor() { bash "$MONITOR" "$@" 2>&1; }
+
+# Run the monitor loop briefly. The `sleep` mock returns immediately, so a
+# fraction of a second is many iterations — enough to reach a sleep decision
+# without waiting for CHECK_INTERVAL.
+run_monitor_briefly() {
+    timeout 1 bash "$MONITOR" start >/dev/null 2>&1 || true
+}
+
+# Seed the idle timer as though the system had been idle for N minutes.
+seed_idle_minutes() {
+    mkdir -p "$PROXMOX_SLEEP_STATE_DIR"
+    printf '%s\n' "$(( $(date +%s) - $1 * 60 ))" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.state"
+}
 manager() { bash "$MANAGER" "$@" 2>&1; }
 
 # ── Runner ────────────────────────────────────────────────────────────────────
@@ -389,6 +402,8 @@ EOF
     assert_contains "hibernate command sent" "$(calls)" "shutdown /h"
     assert_contains "confirmed complete"     "$out"     "hibernation confirmed complete"
     assert_contains "state is hibernated"    "$(read_state)" "vm_100=hibernated"
+    # Confirmation requires three consecutive stopped polls, not one.
+    assert_contains "waits for 3 checks"     "$out"     "check 3 of 3"
 }
 
 test_hibernate_timeout_upserts_single_state_line() {
@@ -888,6 +903,110 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_suspends_once_threshold_is_reached() {
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=15
+CHECK_INTERVAL=1
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    seed_idle_minutes 30
+
+    run_monitor_briefly
+    assert_contains "host is suspended" "$(calls)" "systemctl suspend"
+}
+
+test_does_not_suspend_below_threshold() {
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=15
+CHECK_INTERVAL=1
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    seed_idle_minutes 2
+
+    run_monitor_briefly
+    assert_not_contains "host stays awake" "$(calls)" "systemctl suspend"
+}
+
+test_wake_grace_period_declines_sleep() {
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=1
+CHECK_INTERVAL=1
+WAKE_GRACE_PERIOD=600
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    # The wake must predate the idle start, or the staleness guard resets the
+    # timer before the grace period is ever consulted. 120s since wake is inside
+    # WAKE_GRACE_PERIOD, while the 90s of idle already meets the 1-minute
+    # threshold.
+    mkdir -p "$PROXMOX_SLEEP_STATE_DIR"
+    printf '%s\n' "$(( $(date +%s) - 120 ))" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.wake"
+    printf '%s\n' "$(( $(date +%s) - 90 ))"  > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.state"
+
+    run_monitor_briefly
+    assert_not_contains "no suspend just after wake" "$(calls)" "systemctl suspend"
+    assert_contains "says why" "$(cat "$IDLE_MONITOR_LOG")" "Within wake grace period"
+}
+
+test_active_system_never_suspends() {
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=1
+CHECK_INTERVAL=1
+VM_100_GAMING_PROCESSES="steam.exe"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_VM_PROCS_100=$'explorer\nsteam'
+    seed_idle_minutes 30
+
+    run_monitor_briefly
+    assert_not_contains "gaming blocks sleep" "$(calls)" "systemctl suspend"
+}
+
+test_default_sleep_actions_are_applied() {
+    # Neither SLEEP_ACTION is set, which is what a user gets from a bare
+    # VM_IDS/CONTAINER_IDS config. The documented defaults must still apply.
+    write_config <<'EOF'
+VM_IDS="100"
+CONTAINER_IDS="200"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_PCT_STATUS_200=running
+    export HIBERNATE_TIMEOUT=60
+
+    manager pre-sleep > /dev/null
+    local st; st="$(read_state)"
+    assert_contains "VM default is hibernate"    "$st" "vm_100=hibernated"
+    assert_contains "CT default is shutdown"     "$st" "ct_200=shutdown"
+}
+
+test_container_invalid_action_names_shutdown_fallback() {
+    write_config <<'EOF'
+CONTAINER_IDS="200"
+CONTAINER_200_SLEEP_ACTION=shutdwn
+EOF
+    export MOCK_PCT_STATUS_200=running
+
+    local out; out="$(manager status)"
+    assert_contains "names the CT fallback" "$out" "will fall back to shutdown"
+}
+
+test_sleep_inhibitor_in_delay_mode_blocks() {
+    # `systemd-inhibit --what=sleep --mode=delay` is what NetworkManager and
+    # friends take; only block was covered before.
+    write_config <<'EOF'
+VM_IDS="100"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_INHIBITORS="NetworkManager 0 root 900 NetworkManager sleep NetworkManager needs to turn off networks delay"
+
+    local out; out="$(monitor check)"
+    assert_contains "delay-mode inhibitor counts" "$out" "Sleep Inhibitors: ACTIVE"
+    assert_contains "blocks sleep"                "$out" "Overall Idle Status: ACTIVE"
+}
+
 test_failed_resume_survives_next_sleep_cycle() {
     # The next pre_sleep truncates the state file. An instance still awaiting
     # resume is stopped by then, so a naive rebuild recorded not_running and
@@ -1309,6 +1428,13 @@ run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_co
 run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
 run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
 run_test "cycle/failed-resume-survives-cycle"    test_failed_resume_survives_next_sleep_cycle
+run_test "sleep/triggers-at-threshold"           test_suspends_once_threshold_is_reached
+run_test "sleep/waits-below-threshold"           test_does_not_suspend_below_threshold
+run_test "sleep/wake-grace-declines"             test_wake_grace_period_declines_sleep
+run_test "sleep/active-system-never-suspends"    test_active_system_never_suspends
+run_test "cycle/default-sleep-actions"           test_default_sleep_actions_are_applied
+run_test "config/ct-invalid-action-fallback"     test_container_invalid_action_names_shutdown_fallback
+run_test "host/inhibitor-delay-mode"             test_sleep_inhibitor_in_delay_mode_blocks
 run_test "cycle/post-wake-reports-failure"       test_post_wake_reports_failure
 run_test "cycle/other-vm-process-ignored"        test_other_vms_process_does_not_block_confirmation
 run_test "legacy/explicit-setting-wins"          test_explicit_per_instance_setting_beats_legacy_shim

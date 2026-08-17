@@ -328,10 +328,27 @@ echo "Idle Tracking: Paused (system is active)"
 
 ## Testing
 
+### Offline test suite
+
+`tests/run-tests.sh` runs both scripts end-to-end through their real CLI
+subcommands with `qm`/`pct`/`pvesh`/`nvidia-smi`/`systemctl`/`pgrep` replaced by
+mocks. It needs no Proxmox host, no root and no network, and CI runs the same
+script on every push and pull request — so run it before pushing.
+
+```bash
+tests/run-tests.sh            # everything
+tests/run-tests.sh gaming     # only tests whose name contains "gaming"
+VERBOSE=1 tests/run-tests.sh  # dump script output for each test
+```
+
+When adding a check or a config setting, add a test for it. See
+[tests/README.md](../tests/README.md) for what the suite covers.
+
 ### Manual Testing Checklist
 
 Before submitting a PR, verify:
 
+- [ ] Offline suite passes: `tests/run-tests.sh`
 - [ ] Scripts pass shellcheck: `shellcheck *.sh`
 - [ ] Install script works on fresh system
 - [ ] Sleep manager handles missing VM gracefully

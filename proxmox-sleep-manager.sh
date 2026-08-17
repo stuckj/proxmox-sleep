@@ -579,11 +579,14 @@ status() {
         echo ""
     done
 
+    # Not necessarily from the last pre-sleep: post_wake keeps the entry for an
+    # instance it could not restart, and that is the record `resume` acts on.
     if [[ -f "$STATE_FILE" ]]; then
-        echo "Pending state (set by last pre-sleep):"
+        echo "Recorded instance state:"
         sed 's/^/  /' "$STATE_FILE"
+        echo "  (run 'proxmox-sleep-manager.sh resume' if an instance is still stopped)"
     else
-        echo "Pending state: none"
+        echo "Recorded instance state: none"
     fi
 
     echo ""

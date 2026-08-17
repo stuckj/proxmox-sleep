@@ -17,8 +17,10 @@ fi
 # Global settings (env vars > config file > defaults)
 IDLE_THRESHOLD_MINUTES="${IDLE_THRESHOLD_MINUTES:-15}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
-GPU_IDLE_THRESHOLD="${GPU_IDLE_THRESHOLD:-10}"
-CPU_IDLE_THRESHOLD="${CPU_IDLE_THRESHOLD:-15}"
+DEFAULT_GPU_IDLE_THRESHOLD=10
+DEFAULT_CPU_IDLE_THRESHOLD=15
+GPU_IDLE_THRESHOLD="${GPU_IDLE_THRESHOLD:-$DEFAULT_GPU_IDLE_THRESHOLD}"
+CPU_IDLE_THRESHOLD="${CPU_IDLE_THRESHOLD:-$DEFAULT_CPU_IDLE_THRESHOLD}"
 GPU_VENDOR="${GPU_VENDOR:-auto}"
 CHECK_SSH_SESSIONS="${CHECK_SSH_SESSIONS:-1}"
 WAKE_GRACE_PERIOD="${WAKE_GRACE_PERIOD:-60}"
@@ -133,6 +135,16 @@ is_valid_metric() { is_integer "$1" && [[ "$1" != "-1" ]]; }
 extract_int()          { echo "$1" | grep -oE '^-?[0-9]+' | head -1; }
 extract_positive_int() { echo "$1" | grep -oE '^[0-9]+' | head -1; }
 
+# check/status never call validate_config, so a threshold the daemon would have
+# refused to start on must not abort them: `-gt` evaluates its operand
+# arithmetically and a non-numeric word is fatal under `set -u`.
+get_threshold() {
+    local var="$1" fallback="$2" builtin_default="$3" value
+    value=$(get_cfg "$var" "$fallback")
+    is_positive_int "$value" || value="$builtin_default"
+    printf '%s\n' "$value"
+}
+
 # Parse JSON "out-data" field from `qm guest exec` output.
 # The raw JSON spans multiple shell lines, so real \n/\r in the wrapper must be
 # collapsed before extracting `out-data`.  The *value* of out-data, however, is
@@ -189,6 +201,20 @@ validate_config() {
     local numeric nval
     for numeric in CHECK_INTERVAL CPU_IDLE_THRESHOLD GPU_IDLE_THRESHOLD WAKE_GRACE_PERIOD; do
         nval="${!numeric}"
+        if ! is_positive_int "$nval"; then
+            echo "ERROR: $numeric must be a non-negative integer (current: '$nval')" >&2
+            errors=$((errors + 1))
+        fi
+    done
+
+    # These belong to proxmox-sleep-manager.sh, which validates nothing and has
+    # no defaults here — but it reads the same file, and a non-numeric
+    # HIBERNATE_TIMEOUT makes its poll loop run zero times and send `qm shutdown`
+    # to a guest that is still writing hiberfil.sys. Unset is fine: the manager
+    # supplies its own numeric default.
+    for numeric in HIBERNATE_TIMEOUT SHUTDOWN_TIMEOUT WAKE_DELAY; do
+        nval="${!numeric-}"
+        [[ -z "$nval" ]] && continue
         if ! is_positive_int "$nval"; then
             echo "ERROR: $numeric must be a non-negative integer (current: '$nval')" >&2
             errors=$((errors + 1))
@@ -869,7 +895,7 @@ is_system_idle() {
         fi
 
         # GPU (inside guest — host nvidia-smi is blind during vfio)
-        local gpu_threshold; gpu_threshold=$(get_cfg "VM_${id}_GPU_IDLE_THRESHOLD" "$GPU_IDLE_THRESHOLD")
+        local gpu_threshold; gpu_threshold=$(get_threshold "VM_${id}_GPU_IDLE_THRESHOLD" "$GPU_IDLE_THRESHOLD" "$DEFAULT_GPU_IDLE_THRESHOLD")
         local gpu_usage; gpu_usage=$(get_vm_gpu_usage "$id")
         debug "VM $id GPU usage: $gpu_usage%"
         if is_valid_metric "$gpu_usage" && [[ "$gpu_usage" -gt "$gpu_threshold" ]]; then
@@ -878,7 +904,7 @@ is_system_idle() {
         fi
 
         # CPU
-        local cpu_threshold; cpu_threshold=$(get_cfg "VM_${id}_CPU_IDLE_THRESHOLD" "$CPU_IDLE_THRESHOLD")
+        local cpu_threshold; cpu_threshold=$(get_threshold "VM_${id}_CPU_IDLE_THRESHOLD" "$CPU_IDLE_THRESHOLD" "$DEFAULT_CPU_IDLE_THRESHOLD")
         local cpu_usage; cpu_usage=$(get_vm_cpu_usage "$id")
         debug "VM $id CPU usage: $cpu_usage%"
         if is_valid_metric "$cpu_usage" && [[ "$cpu_usage" -gt "$cpu_threshold" ]]; then
@@ -941,7 +967,7 @@ is_system_idle() {
 
         # GPU (host-side nvidia-smi — degrades gracefully when GPU is in vfio).
         # Cached across all containers in this cycle.
-        local gpu_threshold; gpu_threshold=$(get_cfg "CONTAINER_${id}_GPU_IDLE_THRESHOLD" "$GPU_IDLE_THRESHOLD")
+        local gpu_threshold; gpu_threshold=$(get_threshold "CONTAINER_${id}_GPU_IDLE_THRESHOLD" "$GPU_IDLE_THRESHOLD" "$DEFAULT_GPU_IDLE_THRESHOLD")
         if [[ "$ct_gpu_read" == "0" ]]; then
             ct_gpu_usage_cached=$(get_ct_gpu_usage)
             ct_gpu_read=1
@@ -954,7 +980,7 @@ is_system_idle() {
         fi
 
         # CPU
-        local cpu_threshold; cpu_threshold=$(get_cfg "CONTAINER_${id}_CPU_IDLE_THRESHOLD" "$CPU_IDLE_THRESHOLD")
+        local cpu_threshold; cpu_threshold=$(get_threshold "CONTAINER_${id}_CPU_IDLE_THRESHOLD" "$CPU_IDLE_THRESHOLD" "$DEFAULT_CPU_IDLE_THRESHOLD")
         local cpu_usage; cpu_usage=$(get_ct_cpu_usage "$id")
         debug "Container $id CPU usage: $cpu_usage%"
         if is_valid_metric "$cpu_usage" && [[ "$cpu_usage" -gt "$cpu_threshold" ]]; then
