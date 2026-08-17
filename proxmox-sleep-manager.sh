@@ -40,7 +40,8 @@ log() {
 get_cfg() {
     local var="$1" default="${2:-}"
     local val="${!var-}"
-    echo "${val:-$default}"
+    # printf, not echo: a value starting with -n/-e would be parsed as an option.
+    printf '%s\n' "${val:-$default}"
 }
 
 # Hydrate legacy single-VM config into the multi-instance form when needed.

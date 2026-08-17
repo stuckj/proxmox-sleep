@@ -50,7 +50,8 @@ EX_CONFIG=78
 get_cfg() {
     local var="$1" default="${2:-}"
     local val="${!var-}"
-    echo "${val:-$default}"
+    # printf, not echo: a value starting with -n/-e would be parsed as an option.
+    printf '%s\n' "${val:-$default}"
 }
 
 # ── Legacy shim ────────────────────────────────────────────────────────────────
@@ -1111,6 +1112,12 @@ status() {
     check_once
 
     echo ""
+    # record_idle_state() bails out at this threshold, so no tracking ever
+    # starts — report that instead of a countdown that will not happen.
+    if [[ "$IDLE_THRESHOLD_MINUTES" -le 0 ]]; then
+        echo "Auto-sleep: DISABLED (IDLE_THRESHOLD_MINUTES=$IDLE_THRESHOLD_MINUTES)"
+        return
+    fi
     if is_system_idle; then
         if [[ -f "$STATE_FILE" ]]; then
             local idle_start; idle_start=$(cat "$STATE_FILE")
@@ -1177,7 +1184,7 @@ case "${1:-}" in
         echo "  See proxmox-sleep.conf.example for the multi-instance format."
         echo ""
         echo "Environment variables (override config file):"
-        echo "  IDLE_THRESHOLD_MINUTES    - Minutes before sleep (default: 15)"
+        echo "  IDLE_THRESHOLD_MINUTES    - Minutes before sleep, 0 disables (default: 15)"
         echo "  GPU_VENDOR                - nvidia, amd, or auto (default: auto)"
         echo "  DEBUG=1                   - Enable debug logging"
         exit 1

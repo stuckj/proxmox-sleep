@@ -849,6 +849,19 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_zero_idle_threshold_status_reports_disabled() {
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=0
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_VM_PROCS_100=$'explorer'
+
+    local out; out="$(monitor status)"
+    assert_contains     "says auto-sleep is off" "$out" "Auto-sleep: DISABLED"
+    assert_not_contains "promises no countdown"  "$out" "Will start on next check"
+}
+
 test_missing_config_file_is_a_config_error() {
     rm -f "$CONFIG_FILE"
     local out rc
@@ -915,6 +928,7 @@ run_test "wake/effective-idle-clamped"           test_effective_idle_clamped_to_
 
 run_test "config/no-instances"                   test_no_instances_configured_is_a_config_error
 run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_config_error
+run_test "config/threshold-zero-disables"        test_zero_idle_threshold_status_reports_disabled
 run_test "config/missing-file"                   test_missing_config_file_is_a_config_error
 
 echo ""
