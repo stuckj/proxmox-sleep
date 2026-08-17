@@ -58,7 +58,7 @@ recorded in the call log.
 
 ## Coverage
 
-44 tests across seven groups:
+Tests are grouped by prefix; `tests/run-tests.sh <substring>` runs one group.
 
 - **legacy/** — the `VMID=`-only config still enumerates one VM in both
   scripts, and `GAMING_PROCESSES=""` means "disabled" rather than "fall back to

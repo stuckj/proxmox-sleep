@@ -27,6 +27,7 @@ LOG_FILE="${SLEEP_MANAGER_LOG:-/var/log/proxmox-sleep-manager.log}"
 STATE_DIR="${PROXMOX_SLEEP_STATE_DIR:-/run/proxmox-sleep}"
 if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
     echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
+    echo "       This must run as root — try: sudo $0 $*" >&2
     exit 1
 fi
 STATE_FILE="$STATE_DIR/sleep-manager.state"
@@ -50,7 +51,9 @@ get_cfg() {
 hydrate_legacy_config() {
     VM_IDS="${VM_IDS:-}"
     CONTAINER_IDS="${CONTAINER_IDS:-}"
-    if [[ -z "$VM_IDS" && -z "$CONTAINER_IDS" && -n "${VMID:-}" ]]; then
+    # Keyed on VM_IDS alone: a legacy install that adds CONTAINER_IDS must keep
+    # its VMID= entry, not lose the VM because a container appeared.
+    if [[ -z "$VM_IDS" && -n "${VMID:-}" ]]; then
         VM_IDS="$VMID"
         printf -v "VM_${VMID}_NAME"            '%s' "${VM_NAME:-windows-vm}"
         printf -v "VM_${VMID}_MONITOR"         '%s' "1"
@@ -436,6 +439,15 @@ resume_all() {
     post_wake
 }
 
+# Annotate an unrecognised sleep action rather than printing it as configured —
+# pre_sleep treats it as "ignore", which is not what the typo looks like.
+describe_action() {
+    case "$1" in
+        hibernate|shutdown|keep_running|ignore) printf '%s\n' "$1" ;;
+        *) printf '%s (INVALID — will be ignored, instance left running)\n' "$1" ;;
+    esac
+}
+
 status() {
     echo "Proxmox Sleep Manager Status"
     echo "============================="
@@ -459,7 +471,7 @@ status() {
         else
             echo "  Status:        STOPPED"
         fi
-        echo "  Sleep action:  $action"
+        echo "  Sleep action:  $(describe_action "$action")"
         echo "  Resume on wake: $resume"
         echo ""
     done
@@ -474,7 +486,7 @@ status() {
         else
             echo "  Status:        STOPPED"
         fi
-        echo "  Sleep action:  $action"
+        echo "  Sleep action:  $(describe_action "$action")"
         echo "  Resume on wake: $resume"
         echo ""
     done

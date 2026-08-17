@@ -109,6 +109,9 @@ VM_100_CHECK_USER_IDLE=1
 # Optional per-instance overrides (uncomment to set):
 # VM_100_CPU_IDLE_THRESHOLD=15
 # VM_100_GPU_IDLE_THRESHOLD=10
+# Overrides the global GPU_VENDOR for this VM — needed when one VM passes
+# through an NVIDIA card and another an AMD one.
+# VM_100_GPU_VENDOR=nvidia
 
 ###############################################################################
 # Per-container settings     (CONTAINER_<id>_<SETTING>)

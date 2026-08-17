@@ -193,6 +193,27 @@ EOF
     assert_contains "otherwise idle"                "$out" "Overall Idle Status: IDLE"
 }
 
+test_legacy_vmid_survives_adding_a_container() {
+    # Adding CONTAINER_IDS to a legacy VMID= install must not drop the VM. It
+    # used to: hydration required CONTAINER_IDS to be empty too, so the VM went
+    # unmanaged and the host suspended with it running.
+    write_config <<'EOF'
+VMID=100
+VM_NAME="win-game-vm"
+CONTAINER_IDS="200"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_PCT_STATUS_200=running
+
+    local out; out="$(monitor check)"
+    assert_contains "VM still enumerated" "$out" "VM IDs: 100"
+    assert_contains "VM still checked"    "$out" "VM 100 (win-game-vm)"
+    assert_contains "container too"       "$out" "Container IDs: 200"
+
+    local mout; mout="$(manager status)"
+    assert_contains "manager sees the VM" "$mout" "VM IDs: 100"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Multi-instance enumeration
 # ══════════════════════════════════════════════════════════════════════════════
@@ -733,15 +754,33 @@ EOF
 }
 
 test_sleep_inhibitor_blocks_sleep() {
+    # Real `systemd-inhibit --list --no-legend` layout: WHO UID USER PID COMM
+    # WHAT WHY MODE, with a multi-word WHO and WHY. A fixed field index cannot
+    # find WHAT here, which is the whole point of the case.
     write_config <<'EOF'
 VM_IDS="100"
 EOF
     export MOCK_QM_STATUS_100=stopped
-    export MOCK_INHIBITORS="backup 1234 root sleep:shutdown backup-running block"
+    export MOCK_INHIBITORS="Backup Service 0 root 1234 backup-runner sleep:shutdown Backup in progress block"
 
     local out; out="$(monitor check)"
     assert_contains "inhibitor detected" "$out" "Sleep Inhibitors: ACTIVE"
+    assert_contains "names the holder"   "$out" "Backup Service"
     assert_contains "blocks sleep"       "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_non_sleep_inhibitor_does_not_block() {
+    # A shutdown-only inhibitor must not hold off sleep. This is the line a
+    # stock Debian host actually carries, verbatim from systemd 259.
+    write_config <<'EOF'
+VM_IDS="100"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_INHIBITORS="Unattended Upgrades Shutdown 0 root 344 unattended-upgr shutdown Stop ongoing upgrades or perform upgrades before shutdown delay"
+
+    local out; out="$(monitor check)"
+    assert_contains "no sleep inhibitor" "$out" "Sleep Inhibitors: none"
+    assert_contains "still idle"         "$out" "Overall Idle Status: IDLE"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -849,6 +888,33 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_bad_sleep_action_is_a_config_error() {
+    # An unrecognised action used to fall through to "ignore", leaving a
+    # passthrough VM running while the host suspended.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION=hibernte
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "VM_100_SLEEP_ACTION='hibernte'"
+    assert_contains "lists valid values" "$out" "hibernate, shutdown, keep_running, ignore"
+}
+
+test_invalid_sleep_action_flagged_in_status() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION=hibernte
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out; out="$(manager status)"
+    assert_contains "marks it invalid" "$out" "INVALID"
+}
+
 test_zero_idle_threshold_status_reports_disabled() {
     write_config <<'EOF'
 VM_IDS="100"
@@ -881,6 +947,7 @@ run_test "legacy/manager-enumerates-vm"          test_legacy_manager_enumerates_
 run_test "legacy/monitor-enumerates-vm"          test_legacy_monitor_enumerates_vm
 run_test "legacy/gaming-default-preserved"       test_legacy_gaming_default_preserved
 run_test "legacy/gaming-explicitly-disabled"     test_legacy_gaming_explicitly_disabled
+run_test "legacy/vmid-plus-container"            test_legacy_vmid_survives_adding_a_container
 
 run_test "multi/enumeration"                     test_multi_instance_enumeration
 
@@ -921,6 +988,7 @@ run_test "host/blocking-process"                 test_host_blocking_process_bloc
 run_test "host/blocking-unit"                    test_host_blocking_unit_blocks_sleep
 run_test "host/ssh-session"                      test_ssh_session_blocks_sleep
 run_test "host/sleep-inhibitor"                  test_sleep_inhibitor_blocks_sleep
+run_test "host/non-sleep-inhibitor-ignored"      test_non_sleep_inhibitor_does_not_block
 
 run_test "wake/corrupt-wake-file-repaired"       test_corrupt_wake_file_is_repaired
 run_test "wake/post-wake-resets-idle-tracking"   test_post_wake_resets_idle_tracking
@@ -928,6 +996,8 @@ run_test "wake/effective-idle-clamped"           test_effective_idle_clamped_to_
 
 run_test "config/no-instances"                   test_no_instances_configured_is_a_config_error
 run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_config_error
+run_test "config/bad-sleep-action"               test_bad_sleep_action_is_a_config_error
+run_test "config/invalid-action-in-status"       test_invalid_sleep_action_flagged_in_status
 run_test "config/threshold-zero-disables"        test_zero_idle_threshold_status_reports_disabled
 run_test "config/missing-file"                   test_missing_config_file_is_a_config_error
 

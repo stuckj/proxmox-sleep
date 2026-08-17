@@ -31,10 +31,11 @@ Proxmox Sleep Manager is a power management solution for Proxmox hosts running W
 
 - All shell scripts must pass `shellcheck`
 - Quote all variables: `"$variable"`
-- The two daemons use `set -uo pipefail` — **not** `-e`. A monitor that runs for weeks must
-  survive a failing `qm status` or `pct exec`, so failures are handled at the call site
-  instead of aborting the process. `install.sh` and `uninstall.sh` do use `set -euo pipefail`;
-  they are short and should stop at the first error.
+- `proxmox-idle-monitor.sh` uses `set -uo pipefail` — **not** `-e`. A monitor that runs for
+  weeks must survive a failing `qm status` or `pct exec`, so failures are handled at the call
+  site instead of aborting the process. `install.sh` and `uninstall.sh` use `set -euo pipefail`;
+  they are short and should stop at the first error. **`proxmox-sleep-manager.sh` sets no
+  options at all** — do not describe it as if it did.
 - `log()` takes a **single** argument: `log "message"`. There is no level parameter —
   `log "INFO" "msg"` prints only `INFO` and silently drops the message.
 - `log()` writes to the log file. CLI subcommands (`status`, `check`) print to stdout with
@@ -338,8 +339,9 @@ Three rules for checking a claim before repeating it:
    or the real command output. Grepping documentation produces false gaps and hides true ones.
 
 This has already cost something here: `CLAUDE.md` and `docs/DEVELOPMENT.md` both documented
-`set -euo pipefail` and a two-argument `log "LEVEL" "message"`. Neither was true — the daemons
-run `set -uo pipefail` on purpose and `log()` takes one argument, so `log "INFO" "msg"` would
+`set -euo pipefail` and a two-argument `log "LEVEL" "message"`. Neither was true — the idle
+monitor omits `-e` on purpose (and the sleep manager sets nothing at all), and `log()` takes
+one argument, so `log "INFO" "msg"` would
 have printed `INFO` and dropped the message. Two documents agreeing is not evidence.
 
 A claim about someone else's software — `qm`, `pct`, `pvesh`, the QEMU guest agent, systemd —

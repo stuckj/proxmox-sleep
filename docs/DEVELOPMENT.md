@@ -295,13 +295,14 @@ The code is correct as-is because [reason].
 ### Error Handling
 
 ```bash
-# The long-running daemons omit -e: a failing `qm status` or `pct exec` must not
+# proxmox-idle-monitor.sh omits -e: a failing `qm status` or `pct exec` must not
 # kill a monitor that has to survive for weeks. install.sh/uninstall.sh use -e.
+# proxmox-sleep-manager.sh currently sets no options at all.
 set -uo pipefail
 
 # Use explicit error handling for expected failures
 if ! some_command; then
-    log "ERROR" "some_command failed"
+    log "some_command failed"
     return 1
 fi
 

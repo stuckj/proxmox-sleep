@@ -34,6 +34,7 @@ STATE_DIR="${PROXMOX_SLEEP_STATE_DIR:-/run/proxmox-sleep}"
 # Note: EX_CONFIG=78 is defined below; use the literal here since it's early.
 if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
     echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
+    echo "       This must run as root — try: sudo $0 $*" >&2
     exit 78
 fi
 STATE_FILE="$STATE_DIR/idle-monitor.state"
@@ -60,7 +61,9 @@ get_cfg() {
 hydrate_legacy_config() {
     VM_IDS="${VM_IDS:-}"
     CONTAINER_IDS="${CONTAINER_IDS:-}"
-    if [[ -z "$VM_IDS" && -z "$CONTAINER_IDS" && -n "${VMID:-}" ]]; then
+    # Keyed on VM_IDS alone: a legacy install that adds CONTAINER_IDS must keep
+    # its VMID= entry, not lose the VM because a container appeared.
+    if [[ -z "$VM_IDS" && -n "${VMID:-}" ]]; then
         VM_IDS="$VMID"
         # GAMING_PROCESSES uses a different default expansion to tell "unset"
         # from "set to empty" — honour the existing pattern exactly.
@@ -145,6 +148,30 @@ validate_config() {
         echo "ERROR: IDLE_THRESHOLD_MINUTES must be a non-negative integer (current: '$IDLE_THRESHOLD_MINUTES')" >&2
         errors=$((errors + 1))
     fi
+
+    # An unrecognised action falls through to "leave it running", so a typo
+    # would suspend the host with a passthrough VM live. Refuse to start.
+    for id in $VM_IDS; do
+        local vm_action; vm_action=$(get_cfg "VM_${id}_SLEEP_ACTION" "hibernate")
+        case "$vm_action" in
+            hibernate|shutdown|keep_running|ignore) ;;
+            *)
+                echo "ERROR: VM_${id}_SLEEP_ACTION='$vm_action' is not one of: hibernate, shutdown, keep_running, ignore" >&2
+                errors=$((errors + 1))
+                ;;
+        esac
+    done
+
+    for id in $CONTAINER_IDS; do
+        local ct_action; ct_action=$(get_cfg "CONTAINER_${id}_SLEEP_ACTION" "shutdown")
+        case "$ct_action" in
+            hibernate|shutdown|keep_running|ignore) ;;
+            *)
+                echo "ERROR: CONTAINER_${id}_SLEEP_ACTION='$ct_action' is not one of: shutdown, keep_running, ignore (hibernate falls back to shutdown)" >&2
+                errors=$((errors + 1))
+                ;;
+        esac
+    done
 
     if [[ $errors -gt 0 ]]; then
         echo "" >&2
@@ -518,6 +545,34 @@ get_active_blocking_units() {
     if [[ ${#active_units[@]} -eq 0 ]]; then echo "none"; else echo "${active_units[*]}"; fi
 }
 
+# Split one `systemd-inhibit --list --no-legend` row into WHO/WHAT/WHY/MODE.
+# The columns are WHO UID USER PID COMM WHAT WHY MODE, but WHO and WHY both
+# contain spaces in practice ("Unattended Upgrades Shutdown 0 root 344 ..."),
+# so no fixed field index finds WHAT. UID and PID are the dependable landmark:
+# both numeric and two fields apart, putting WHAT four past UID and MODE last.
+parse_inhibitor_line() {
+    awk '{
+        for (i = 1; i + 4 <= NF; i++) {
+            if ($i ~ /^[0-9]+$/ && $(i + 2) ~ /^[0-9]+$/) {
+                who = ""
+                for (j = 1; j < i; j++) who = who (j > 1 ? " " : "") $j
+                why = ""
+                for (j = i + 5; j < NF; j++) why = why (j > i + 5 ? " " : "") $j
+                printf "%s\t%s\t%s\t%s\n", who, $(i + 4), why, $NF
+                exit
+            }
+        }
+    }'
+}
+
+# WHAT is a colon-separated list, so a sleep inhibitor may read "sleep" or
+# "sleep:shutdown". block-weak is deliberately not treated as blocking: it
+# exists to be overridden by a privileged caller, which is what this is.
+inhibits_sleep() {
+    local what="$1" mode="$2"
+    [[ "$what" == *"sleep"* ]] && [[ "$mode" == "block" || "$mode" == "delay" ]]
+}
+
 check_sleep_inhibitors() {
     if [[ "$CHECK_SLEEP_INHIBITORS" != "1" ]]; then
         debug "Sleep inhibitor detection disabled"
@@ -531,10 +586,9 @@ check_sleep_inhibitors() {
     fi
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local what mode
-        what=$(echo "$line" | awk '{print $4}')
-        mode=$(echo "$line" | awk '{print $NF}')
-        if [[ "$what" == *"sleep"* ]] && [[ "$mode" == "block" || "$mode" == "delay" ]]; then
+        local who what why mode
+        IFS=$'\t' read -r who what why mode < <(printf '%s\n' "$line" | parse_inhibitor_line)
+        if inhibits_sleep "$what" "$mode"; then
             debug "Found sleep inhibitor: $line"
             return 0
         fi
@@ -551,12 +605,9 @@ get_sleep_inhibitors_detail() {
     local details=()
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        local what mode who why
-        what=$(echo "$line" | awk '{print $4}')
-        mode=$(echo "$line" | awk '{print $NF}')
-        who=$(echo "$line" | awk '{print $1}')
-        why=$(echo "$line" | awk '{$1=$2=$3=$4=""; $NF=""; print}' | xargs)
-        if [[ "$what" == *"sleep"* ]] && [[ "$mode" == "block" || "$mode" == "delay" ]]; then
+        local who what why mode
+        IFS=$'\t' read -r who what why mode < <(printf '%s\n' "$line" | parse_inhibitor_line)
+        if inhibits_sleep "$what" "$mode"; then
             details+=("$who: $why ($mode)")
         fi
     done <<< "$inhibitor_list"
@@ -981,8 +1032,12 @@ monitor_loop() {
     while true; do
         if is_system_idle; then
             if record_idle_state; then
-                trigger_sleep
-                record_wake_time
+                # Only stamp a wake time if a suspend actually happened. Stamping
+                # it after a declined attempt restarts WAKE_GRACE_PERIOD, and a
+                # grace period longer than the idle threshold then never expires.
+                if trigger_sleep; then
+                    record_wake_time
+                fi
                 sleep 10
             fi
         else

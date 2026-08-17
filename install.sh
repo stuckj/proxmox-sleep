@@ -164,7 +164,9 @@ if [[ ! -f /etc/proxmox-sleep.conf ]]; then
         # Uncomment container lines and set values
         sed -i "s/^CONTAINER_IDS=.*/CONTAINER_IDS=\"$ESCAPED_CTID\"/" /etc/proxmox-sleep.conf
         # Append container config if not already present
-        if ! grep -q "CONTAINER_${CTID}_NAME" /etc/proxmox-sleep.conf; then
+        # Anchored: the example config ships a commented CONTAINER_200_NAME=,
+        # so an unanchored match would skip the block for the documented CTID.
+        if ! grep -q "^CONTAINER_${CTID}_NAME=" /etc/proxmox-sleep.conf; then
             cat >> /etc/proxmox-sleep.conf <<EOF
 
 # Container $CTID

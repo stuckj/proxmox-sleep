@@ -130,18 +130,22 @@ This installs a Windows scheduled task that:
 ## Usage
 
 ### Check Status
+
+All subcommands need root: runtime state lives in `/run/proxmox-sleep`, which is
+root-owned so unprivileged users cannot plant symlinks in it.
+
 ```bash
 # Full status with idle tracking info
-proxmox-idle-monitor.sh status
+sudo proxmox-idle-monitor.sh status
 
 # Quick idle check (for testing)
-proxmox-idle-monitor.sh check
+sudo proxmox-idle-monitor.sh check
 
 # Detailed debug output
-DEBUG=1 proxmox-idle-monitor.sh check
+sudo DEBUG=1 proxmox-idle-monitor.sh check
 
 # Sleep manager status (shows all configured instances)
-proxmox-sleep-manager.sh status
+sudo proxmox-sleep-manager.sh status
 ```
 
 ### Sleep Now (Manual Sleep)
