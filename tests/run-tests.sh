@@ -78,6 +78,10 @@ run_monitor_briefly() {
     timeout 1 bash "$MONITOR" start >/dev/null 2>&1 || true
 }
 
+# Config-error tests run `monitor start` expecting it to exit before the loop.
+# They are wrapped in `timeout` so a regression that lets validation pass fails
+# the assertion instead of spinning the daemon until CI is killed.
+
 # Seed the idle timer as though the system had been idle for N minutes.
 seed_idle_minutes() {
     mkdir -p "$PROXMOX_SLEEP_STATE_DIR"
@@ -887,7 +891,7 @@ test_no_instances_configured_is_a_config_error() {
 # deliberately empty
 EOF
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"  "$rc" "78"
     assert_contains "explains itself" "$out" "No VMs or containers configured"
 }
@@ -900,9 +904,144 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"   "$rc" "78"
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
+}
+
+test_leading_zero_threshold_is_a_config_error() {
+    # `[[ 95 -gt 08 ]]` reads 08 as octal, errors, and returns false — so the
+    # comparison the threshold guards silently never fires.
+    write_config <<'EOF'
+VM_IDS="100"
+CPU_IDLE_THRESHOLD=08
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "CPU_IDLE_THRESHOLD must be a non-negative integer"
+}
+
+test_pending_survives_instance_leaving_config() {
+    # An ID removed from VM_IDS while still awaiting resume is visited by no
+    # loop, so nothing would carry its record forward.
+    write_config <<'EOF'
+VM_IDS="100 101"
+VM_100_SLEEP_ACTION="shutdown"
+VM_101_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_QM_STATUS_101=running
+
+    manager pre-sleep > /dev/null
+    export MOCK_QM_START_RC_101=1
+    manager post-wake > /dev/null
+    assert_contains "101 pending" "$(read_state)" "vm_101=shutdown"
+
+    # User drops 101 from the config while it is still down.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+EOF
+    manager pre-sleep > /dev/null
+    assert_contains "101 record kept" "$(read_state)" "vm_101=shutdown"
+
+    unset MOCK_QM_START_RC_101
+    : > "$MOCK_CALL_LOG"
+    manager post-wake > /dev/null
+    assert_contains "101 finally resumes" "$(calls)" "qm start 101"
+}
+
+test_pending_ignored_while_instance_is_running() {
+    # The carry-forward is conditional on the instance actually being down; a
+    # running one must record the action the user configured.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    export MOCK_QM_START_RC_100=1
+    manager post-wake > /dev/null
+    assert_contains "pending recorded" "$(read_state)" "vm_100=shutdown"
+
+    # The user starts it by hand and switches to keep_running.
+    unset MOCK_QM_START_RC_100
+    qm start 100 > /dev/null 2>&1 || true
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="keep_running"
+EOF
+    manager pre-sleep > /dev/null
+    assert_contains "running instance records the action" "$(read_state)" "vm_100=kept_running"
+}
+
+test_status_shows_effective_resume_flag() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_RESUME_ON_WAKE=no
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out; out="$(manager status)"
+    assert_contains "reports what will happen" "$out" "Resume on wake: yes"
+}
+
+test_manager_clamps_bad_shutdown_timeout() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+SHUTDOWN_TIMEOUT=twomin
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out; out="$(manager pre-sleep)"
+    assert_contains "warns about the value" "$out" "SHUTDOWN_TIMEOUT='twomin' is not valid"
+    assert_contains "falls back to default" "$(calls)" "qm shutdown 100 --timeout 120"
+}
+
+test_manager_clamps_bad_wake_delay() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+WAKE_DELAY=soon
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    : > "$MOCK_CALL_LOG"
+    local out; out="$(manager post-wake)"
+    assert_contains "warns about the value" "$out" "WAKE_DELAY='soon' is not valid"
+    assert_contains "sleeps the default"    "$(calls)" "sleep 5"
+}
+
+test_debug_true_enables_debug_output() {
+    # check/status never call validate_config, so debug() has to accept any
+    # non-zero value rather than only the literal 1.
+    write_config <<'EOF'
+VM_IDS="100"
+DEBUG=true
+EOF
+    export MOCK_QM_STATUS_100=stopped
+
+    monitor check > /dev/null
+    assert_contains "debug output produced" "$(cat "$IDLE_MONITOR_LOG" 2>/dev/null || true)" "DEBUG:"
+}
+
+test_manager_environment_overrides_config_file() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+SHUTDOWN_TIMEOUT=120
+EOF
+    export MOCK_QM_STATUS_100=running
+    export SHUTDOWN_TIMEOUT=45
+
+    manager pre-sleep > /dev/null
+    assert_contains "env value reaches qm" "$(calls)" "qm shutdown 100 --timeout 45"
 }
 
 test_pending_resume_survives_keep_running_cycle() {
@@ -988,7 +1127,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"    "$rc" "78"
     assert_contains "names the setting" "$out" "DEBUG='true' must be 0 or 1"
 }
@@ -1058,7 +1197,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"    "$rc" "78"
     assert_contains "names the setting" "$out" "HIBERNATE_TIMEOUT must be a positive integer"
 }
@@ -1073,7 +1212,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG" "$rc" "78"
     assert_contains "rejects zero"   "$out" "HIBERNATE_TIMEOUT must be a positive integer"
 }
@@ -1086,7 +1225,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG" "$rc" "78"
     assert_contains "rejects zero"   "$out" "CHECK_INTERVAL must be a positive integer"
 }
@@ -1130,7 +1269,7 @@ EOF
     export MOCK_PCT_STATUS_200=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG" "$rc" "78"
     assert_contains "names the dupe" "$out" "duplicate instance IDs"
 }
@@ -1332,7 +1471,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"    "$rc" "78"
     assert_contains "names the setting" "$out" "CHECK_SSH_SESSIONS='yes' must be 0 or 1"
 }
@@ -1347,7 +1486,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"    "$rc" "78"
     assert_contains "names the setting" "$out" "CPU_IDLE_THRESHOLD must be a non-negative integer"
 }
@@ -1359,7 +1498,7 @@ EOF
     export MOCK_MISSING_IDS="999"
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"  "$rc" "78"
     assert_contains "names the VM"    "$out" "VM 999 does not exist"
 }
@@ -1510,7 +1649,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG" "$rc" "78"
     assert_contains "names the dupe"  "$out" "duplicate instance IDs"
 }
@@ -1553,7 +1692,9 @@ VM_IDS="100"
 VM_100_SLEEP_ACTION="hibernate"
 EOF
     export MOCK_QM_STATUS_100=running
-    export MOCK_RUNNING_PROCS="/usr/bin/kvm -id 101 -name other -pidfile /var/run/qemu-server/101.pid"
+    # 1001, not 101: without the pattern's trailing space, "-id 100" would be a
+    # prefix of "-id 1001" and the guard would match the wrong guest.
+    export MOCK_RUNNING_PROCS="/usr/bin/kvm -id 1001 -name other -pidfile /var/run/qemu-server/1001.pid"
     export HIBERNATE_TIMEOUT=60
 
     local out; out="$(manager pre-sleep)"
@@ -1571,7 +1712,7 @@ EOF
     export MOCK_QM_STATUS_100=running
 
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"    "$rc" "78"
     assert_contains "names the setting" "$out" "VM_100_SLEEP_ACTION='hibernte'"
     assert_contains "lists valid values" "$out" "hibernate, shutdown, keep_running, ignore"
@@ -1604,7 +1745,7 @@ EOF
 test_missing_config_file_is_a_config_error() {
     rm -f "$CONFIG_FILE"
     local out rc
-    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
     assert_rc "exits with EX_CONFIG"  "$rc" "78"
     assert_contains "points at the example" "$out" "Configuration file not found"
 }
@@ -1672,6 +1813,14 @@ run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_co
 run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
 run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
 run_test "cycle/failed-resume-survives-cycle"    test_failed_resume_survives_next_sleep_cycle
+run_test "config/leading-zero-threshold"         test_leading_zero_threshold_is_a_config_error
+run_test "cycle/pending-survives-deconfigured"   test_pending_survives_instance_leaving_config
+run_test "cycle/pending-ignored-when-running"    test_pending_ignored_while_instance_is_running
+run_test "config/effective-resume-flag"          test_status_shows_effective_resume_flag
+run_test "cycle/clamps-shutdown-timeout"         test_manager_clamps_bad_shutdown_timeout
+run_test "cycle/clamps-wake-delay"               test_manager_clamps_bad_wake_delay
+run_test "config/debug-true-enables"             test_debug_true_enables_debug_output
+run_test "config/manager-env-overrides"          test_manager_environment_overrides_config_file
 run_test "cycle/pending-survives-keep-running"   test_pending_resume_survives_keep_running_cycle
 run_test "cycle/running-records-kept-running"    test_running_instance_still_records_kept_running
 run_test "cycle/manager-clamps-bad-timeout"      test_manager_clamps_bad_hibernate_timeout

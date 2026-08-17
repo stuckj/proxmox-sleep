@@ -457,6 +457,17 @@ pre_sleep() {
         esac
     done
 
+    # An instance dropped from VM_IDS/CONTAINER_IDS while still awaiting resume
+    # is visited by neither loop, so nothing carried its record forward. We
+    # stopped it, so keep the note until something starts it again.
+    local pending_key
+    for pending_key in "${!PENDING_STATE[@]}"; do
+        if ! grep -q "^${pending_key}=" "$STATE_FILE" 2>/dev/null; then
+            log "$pending_key is no longer configured but still awaiting resume; keeping its record"
+            state_set "$pending_key" "${PENDING_STATE[$pending_key]}"
+        fi
+    done
+
     log "=== PRE-SLEEP HOOK COMPLETE (exit: $overall_rc) ==="
     # Default: return 0 so a failed instance doesn't abort systemd's sleep
     # transition (matches prior behavior). Manual callers can set
@@ -569,6 +580,16 @@ resume_all() {
 # Print the configured action alongside what pre_sleep will actually do, which
 # differs by kind: LXC cannot hibernate, and an unrecognised value falls back to
 # the kind's default rather than being left alone.
+# post_wake resumes unless the value is exactly 0, so printing the raw string
+# would read as the opposite of what happens for anything else.
+describe_resume() {
+    case "$1" in
+        0) printf 'no\n' ;;
+        1) printf 'yes\n' ;;
+        *) printf 'yes (%s is not 0 or 1)\n' "$1" ;;
+    esac
+}
+
 describe_action() {
     local action="$1" kind="$2"
     case "$kind:$action" in
@@ -607,7 +628,7 @@ status() {
             echo "  Status:        STOPPED"
         fi
         echo "  Sleep action:  $(describe_action "$action" vm)"
-        echo "  Resume on wake: $resume"
+        echo "  Resume on wake: $(describe_resume "$resume")"
         echo ""
     done
 
@@ -622,7 +643,7 @@ status() {
             echo "  Status:        STOPPED"
         fi
         echo "  Sleep action:  $(describe_action "$action" ct)"
-        echo "  Resume on wake: $resume"
+        echo "  Resume on wake: $(describe_resume "$resume")"
         echo ""
     done
 

@@ -147,7 +147,11 @@ debug() {
 # and leaving it stopped; validate_config rejects the typo at startup anyway.
 is_enabled() { [[ "$1" != "0" ]]; }
 
-is_positive_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
+# Leading zeros are rejected: `[[ x -gt 08 ]]` evaluates its operands as
+# arithmetic, where a leading zero means octal, so 08/09 are invalid and the
+# test errors out to false. Accepting them here would let validate_config pass a
+# value that silently disables the comparison it guards.
+is_positive_int() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 is_integer()      { [[ "$1" =~ ^-?[0-9]+$ ]]; }
 is_valid_metric() { is_integer "$1" && [[ "$1" != "-1" ]]; }
 extract_int()          { echo "$1" | grep -oE '^-?[0-9]+' | head -1; }
