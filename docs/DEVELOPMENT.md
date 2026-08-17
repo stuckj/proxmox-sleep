@@ -285,7 +285,7 @@ The code is correct as-is because [reason].
 
 ### Shell Script Style
 
-- **Shebang**: `#!/usr/bin/env bash`
+- **Shebang**: `#!/bin/bash`
 - **Shellcheck**: All scripts should pass shellcheck
 - **Quoting**: Always quote variables: `"$variable"`
 - **Functions**: Use lowercase with underscores: `my_function()`
@@ -295,8 +295,9 @@ The code is correct as-is because [reason].
 ### Error Handling
 
 ```bash
-# Use set -e for early exit on errors
-set -euo pipefail
+# The long-running daemons omit -e: a failing `qm status` or `pct exec` must not
+# kill a monitor that has to survive for weeks. install.sh/uninstall.sh use -e.
+set -uo pipefail
 
 # Use explicit error handling for expected failures
 if ! some_command; then
@@ -311,10 +312,15 @@ trap cleanup EXIT
 ### Logging
 
 ```bash
-# Always use the log function
-log "INFO" "Starting operation"
-log "DEBUG" "Variable value: $var"  # Only shown if DEBUG=1
-log "ERROR" "Operation failed"
+# log() takes a single argument — there is no level parameter.
+log "Starting operation"
+log "Operation failed"
+
+# debug() is the DEBUG=1-only channel, and writes to the log file directly.
+debug "Variable value: $var"
+
+# CLI subcommands (status, check) print their result to stdout with echo.
+echo "Idle Tracking: Paused (system is active)"
 ```
 
 ---
