@@ -9,10 +9,27 @@ set -uo pipefail
 
 # Load configuration file if it exists
 CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-sleep.conf}"
+
+# Sourcing assigns, so any setting the config file names would otherwise
+# overwrite the one inherited from the environment — the reverse of the
+# documented precedence, and enough to make `DEBUG=1 ... check` silently do
+# nothing against the shipped example, which sets DEBUG=0. Snapshot what the
+# environment supplied and reapply it afterwards. The systemd units run with a
+# clean environment, so this only affects interactive invocations.
+declare -A _ENV_SNAPSHOT=()
+while IFS= read -r _name; do
+    _ENV_SNAPSHOT["$_name"]="${!_name}"
+done < <(compgen -e)
+
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 fi
+
+for _name in "${!_ENV_SNAPSHOT[@]}"; do
+    printf -v "$_name" '%s' "${_ENV_SNAPSHOT[$_name]}"
+done
+unset _name _ENV_SNAPSHOT
 
 # Global settings (env vars > config file > defaults)
 IDLE_THRESHOLD_MINUTES="${IDLE_THRESHOLD_MINUTES:-15}"
@@ -199,7 +216,7 @@ validate_config() {
     # arithmetically: a non-numeric word aborts the daemon under `set -u`, and
     # systemd restarts it straight into the same failure.
     local numeric nval
-    for numeric in CHECK_INTERVAL CPU_IDLE_THRESHOLD GPU_IDLE_THRESHOLD WAKE_GRACE_PERIOD; do
+    for numeric in CPU_IDLE_THRESHOLD GPU_IDLE_THRESHOLD WAKE_GRACE_PERIOD; do
         nval="${!numeric}"
         if ! is_positive_int "$nval"; then
             echo "ERROR: $numeric must be a non-negative integer (current: '$nval')" >&2
@@ -207,19 +224,34 @@ validate_config() {
         fi
     done
 
+    # Zero is meaningless for a poll interval: monitor_loop's `sleep 0` returns
+    # instantly and the daemon spins, forking qm/pct/pvesh continuously.
+    if ! is_positive_int "$CHECK_INTERVAL" || [[ "$CHECK_INTERVAL" -lt 1 ]]; then
+        echo "ERROR: CHECK_INTERVAL must be a positive integer (current: '$CHECK_INTERVAL')" >&2
+        errors=$((errors + 1))
+    fi
+
     # These belong to proxmox-sleep-manager.sh, which validates nothing and has
     # no defaults here — but it reads the same file, and a non-numeric
     # HIBERNATE_TIMEOUT makes its poll loop run zero times and send `qm shutdown`
     # to a guest that is still writing hiberfil.sys. Unset is fine: the manager
     # supplies its own numeric default.
-    for numeric in HIBERNATE_TIMEOUT SHUTDOWN_TIMEOUT WAKE_DELAY; do
+    for numeric in HIBERNATE_TIMEOUT SHUTDOWN_TIMEOUT; do
         nval="${!numeric-}"
         [[ -z "$nval" ]] && continue
-        if ! is_positive_int "$nval"; then
-            echo "ERROR: $numeric must be a non-negative integer (current: '$nval')" >&2
+        # Zero would make hibernate_vm's poll loop run no iterations at all and
+        # fall straight through to `qm shutdown` on a guest mid-hibernate.
+        if ! is_positive_int "$nval" || [[ "$nval" -lt 1 ]]; then
+            echo "ERROR: $numeric must be a positive integer (current: '$nval')" >&2
             errors=$((errors + 1))
         fi
     done
+
+    nval="${WAKE_DELAY-}"
+    if [[ -n "$nval" ]] && ! is_positive_int "$nval"; then
+        echo "ERROR: WAKE_DELAY must be a non-negative integer (current: '$nval')" >&2
+        errors=$((errors + 1))
+    fi
 
     # Host-level checks follow the same rule as the per-instance flags: off only
     # when explicitly 0, and anything else is a typo that would silently drop a
@@ -928,7 +960,8 @@ is_system_idle() {
         if is_enabled "$check_user_idle"; then
             local effective_idle; effective_idle=$(get_effective_idle_time "$id")
             debug "VM $id effective idle time: ${effective_idle}s"
-            if is_valid_metric "$effective_idle" && [[ "$effective_idle" -lt "$CHECK_INTERVAL" ]]; then
+            local interval; interval=$(get_threshold CHECK_INTERVAL "$CHECK_INTERVAL" 60)
+            if is_valid_metric "$effective_idle" && [[ "$effective_idle" -lt "$interval" ]]; then
                 debug "VM $id user recently active (${effective_idle}s < ${CHECK_INTERVAL}s)"
                 return 1
             fi

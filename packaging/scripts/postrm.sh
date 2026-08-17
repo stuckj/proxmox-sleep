@@ -7,8 +7,9 @@ systemctl daemon-reload || true
 # Clean up runtime state directory — but not on upgrade, where dpkg also runs
 # this script. The state file can hold an instance that failed to resume and is
 # still waiting for `proxmox-sleep-manager.sh resume`.
+# dpkg passes remove/purge/upgrade; rpm passes a count, 0 on final erase.
 case "${1:-remove}" in
-    remove|purge) rm -rf /run/proxmox-sleep ;;
+    remove|purge|0) rm -rf /run/proxmox-sleep ;;
 esac
 # Clean up legacy /tmp state files from pre-/run versions
 rm -f /tmp/proxmox-sleep-manager.state

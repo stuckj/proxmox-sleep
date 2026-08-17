@@ -373,8 +373,9 @@ shellcheck -x *.sh
 # Test status display
 ./proxmox-idle-monitor.sh status
 
-# Simulate sleep (without actually sleeping)
-DEBUG=1 ./proxmox-sleep-manager.sh pre-sleep
+# Simulate sleep (without actually sleeping). The sleep manager has no DEBUG
+# channel — it logs every step unconditionally to /var/log/proxmox-sleep-manager.log.
+./proxmox-sleep-manager.sh pre-sleep
 ```
 
 ---

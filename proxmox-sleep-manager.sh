@@ -7,10 +7,24 @@
 
 # Load configuration file if it exists
 CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-sleep.conf}"
+
+# Sourcing assigns, so a setting named in the config file would otherwise
+# overwrite the one inherited from the environment — the reverse of the
+# documented precedence. Snapshot the environment and reapply it afterwards.
+declare -A _ENV_SNAPSHOT=()
+while IFS= read -r _name; do
+    _ENV_SNAPSHOT["$_name"]="${!_name}"
+done < <(compgen -e)
+
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 fi
+
+for _name in "${!_ENV_SNAPSHOT[@]}"; do
+    printf -v "$_name" '%s' "${_ENV_SNAPSHOT[$_name]}"
+done
+unset _name _ENV_SNAPSHOT
 
 # Global settings (env vars override config file, defaults as fallback)
 HIBERNATE_TIMEOUT="${HIBERNATE_TIMEOUT:-300}"

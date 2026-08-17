@@ -152,7 +152,9 @@ if [[ ! -f /etc/proxmox-sleep.conf ]]; then
         # Re-key the entire VM_100_* block to VM_<VMID>_* so all per-instance
         # settings (MONITOR, SLEEP_ACTION, GAMING_PROCESSES, etc.) apply.
         if [[ "$ESCAPED_VMID" != "100" ]]; then
-            sed -i "s/^VM_100_/VM_${ESCAPED_VMID}_/" /etc/proxmox-sleep.conf
+            # Commented overrides are re-keyed too, so uncommenting one later
+            # applies to this VM rather than to a VM 100 that does not exist.
+            sed -i "s/^\(# \?\)\?VM_100_/\1VM_${ESCAPED_VMID}_/" /etc/proxmox-sleep.conf
         fi
         sed -i "s/^VM_${ESCAPED_VMID}_NAME=.*/VM_${ESCAPED_VMID}_NAME=\"$ESCAPED_VM_NAME\"/" /etc/proxmox-sleep.conf
     else

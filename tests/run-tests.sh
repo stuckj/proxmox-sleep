@@ -903,6 +903,132 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_environment_overrides_config_file() {
+    # The config file is sourced, which assigns — so without a snapshot it would
+    # win over the environment and `DEBUG=1 ... check` would do nothing against
+    # the shipped example, which sets DEBUG=0.
+    write_config <<'EOF'
+VM_IDS="100"
+DEBUG=0
+IDLE_THRESHOLD_MINUTES=0
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export DEBUG=1
+    export IDLE_THRESHOLD_MINUTES=15
+
+    local out; out="$(monitor status)"
+    assert_not_contains "env threshold wins" "$out" "Auto-sleep: DISABLED"
+    assert_contains     "env DEBUG wins"     "$(cat "$IDLE_MONITOR_LOG" 2>/dev/null || true)" "DEBUG:"
+}
+
+test_declined_sleep_does_not_restamp_wake_time() {
+    # Stamping a wake time after a declined attempt restarts the grace period,
+    # so a grace period longer than the idle threshold never expires and the
+    # host never sleeps at all.
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=1
+CHECK_INTERVAL=1
+WAKE_GRACE_PERIOD=600
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    mkdir -p "$PROXMOX_SLEEP_STATE_DIR"
+    local wake_before=$(( $(date +%s) - 120 ))
+    printf '%s\n' "$wake_before" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.wake"
+    printf '%s\n' "$(( $(date +%s) - 90 ))" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.state"
+
+    run_monitor_briefly
+
+    local wake_after; wake_after="$(cat "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.wake")"
+    assert_contains "declined the sleep" "$(cat "$IDLE_MONITOR_LOG")" "Within wake grace period"
+    assert_eq       "wake time untouched" "$wake_after" "$wake_before"
+}
+
+test_bad_hibernate_timeout_is_a_config_error() {
+    write_config <<'EOF'
+VM_IDS="100"
+HIBERNATE_TIMEOUT=forever
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "HIBERNATE_TIMEOUT must be a positive integer"
+}
+
+test_zero_hibernate_timeout_is_a_config_error() {
+    # 0 would make the confirmation loop run no iterations and send `qm shutdown`
+    # to a guest that is still writing hiberfil.sys.
+    write_config <<'EOF'
+VM_IDS="100"
+HIBERNATE_TIMEOUT=0
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG" "$rc" "78"
+    assert_contains "rejects zero"   "$out" "HIBERNATE_TIMEOUT must be a positive integer"
+}
+
+test_zero_check_interval_is_a_config_error() {
+    write_config <<'EOF'
+VM_IDS="100"
+CHECK_INTERVAL=0
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG" "$rc" "78"
+    assert_contains "rejects zero"   "$out" "CHECK_INTERVAL must be a positive integer"
+}
+
+test_unknown_windows_idle_does_not_block_sleep() {
+    # The helper reports -1 when it cannot tell. That is "no signal", not
+    # "active" — treating it as a real measurement would block sleep forever.
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_CHECK_USER_IDLE=1
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_VM_IDLE_100=-1
+    export MOCK_VM_SCREENSAVER_100=-1
+
+    local out; out="$(monitor check)"
+    assert_contains "no signal does not block" "$out" "Overall Idle Status: IDLE"
+}
+
+test_duplicate_container_ids_acted_on_once() {
+    write_config <<'EOF'
+CONTAINER_IDS="200 200"
+CONTAINER_200_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_PCT_STATUS_200=running
+
+    manager pre-sleep > /dev/null
+    local st; st="$(read_state)"
+    assert_contains     "recorded as shutdown"    "$st" "ct_200=shutdown"
+    assert_not_contains "not clobbered by pass 2" "$st" "not_running"
+
+    : > "$MOCK_CALL_LOG"
+    manager post-wake > /dev/null
+    assert_contains "still resumes" "$(calls)" "pct start 200"
+}
+
+test_duplicate_container_ids_are_a_config_error() {
+    write_config <<'EOF'
+CONTAINER_IDS="200 200"
+EOF
+    export MOCK_PCT_STATUS_200=running
+
+    local out rc
+    out="$(bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG" "$rc" "78"
+    assert_contains "names the dupe" "$out" "duplicate instance IDs"
+}
+
 test_suspends_once_threshold_is_reached() {
     write_config <<'EOF'
 VM_IDS="100"
@@ -926,7 +1052,10 @@ EOF
     seed_idle_minutes 2
 
     run_monitor_briefly
-    assert_not_contains "host stays awake" "$(calls)" "systemctl suspend"
+    # Anchor on the loop having run: a daemon that exited early would satisfy
+    # the negative assertion without testing anything.
+    assert_contains     "loop actually ran"  "$(cat "$IDLE_MONITOR_LOG")" "System has been idle for"
+    assert_not_contains "host stays awake"   "$(calls)" "systemctl suspend"
 }
 
 test_wake_grace_period_declines_sleep() {
@@ -962,6 +1091,7 @@ EOF
     seed_idle_minutes 30
 
     run_monitor_briefly
+    assert_contains     "loop actually ran"   "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold:"
     assert_not_contains "gaming blocks sleep" "$(calls)" "systemctl suspend"
 }
 
@@ -1428,6 +1558,14 @@ run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_co
 run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
 run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
 run_test "cycle/failed-resume-survives-cycle"    test_failed_resume_survives_next_sleep_cycle
+run_test "config/env-overrides-config"           test_environment_overrides_config_file
+run_test "sleep/declined-keeps-wake-time"        test_declined_sleep_does_not_restamp_wake_time
+run_test "config/bad-hibernate-timeout"          test_bad_hibernate_timeout_is_a_config_error
+run_test "config/zero-hibernate-timeout"         test_zero_hibernate_timeout_is_a_config_error
+run_test "config/zero-check-interval"            test_zero_check_interval_is_a_config_error
+run_test "flags/unknown-windows-idle"            test_unknown_windows_idle_does_not_block_sleep
+run_test "cycle/duplicate-ct-ids-acted-once"     test_duplicate_container_ids_acted_on_once
+run_test "config/duplicate-ct-ids"               test_duplicate_container_ids_are_a_config_error
 run_test "sleep/triggers-at-threshold"           test_suspends_once_threshold_is_reached
 run_test "sleep/waits-below-threshold"           test_does_not_suspend_below_threshold
 run_test "sleep/wake-grace-declines"             test_wake_grace_period_declines_sleep

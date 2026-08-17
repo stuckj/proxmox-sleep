@@ -277,7 +277,8 @@ gh api "repos/${REPO}/pulls/${PR_NUM}/comments" --paginate | jq '.[].id'
 ### Modifying Sleep/Wake Behavior
 
 1. Changes go in `proxmox-sleep-manager.sh`
-2. Test with `DEBUG=1` to see detailed logs
+2. Read `/var/log/proxmox-sleep-manager.log` — the manager logs every step
+   unconditionally and has no `DEBUG` channel; only the idle monitor does
 3. Test the full cycle: hibernate → sleep → wake → resume
 
 ### Testing Changes
