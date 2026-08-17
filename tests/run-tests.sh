@@ -888,6 +888,80 @@ EOF
     assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
 }
 
+test_failed_resume_keeps_state_for_retry() {
+    # The state file is the only record of what still needs starting. Clearing
+    # it after a failed resume left the VM stopped with no way to retry, and
+    # the documented `resume` command a no-op.
+    write_config <<'EOF'
+VM_IDS="100"
+CONTAINER_IDS="200"
+VM_100_SLEEP_ACTION="shutdown"
+CONTAINER_200_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_PCT_STATUS_200=running
+
+    manager pre-sleep > /dev/null
+    export MOCK_QM_START_RC_100=1
+    manager post-wake > /dev/null
+
+    local st; st="$(read_state)"
+    assert_contains     "failed VM is retained"  "$st" "vm_100="
+    assert_not_contains "resumed CT is dropped"  "$st" "ct_200="
+
+    # The retry path must still find something to act on.
+    unset MOCK_QM_START_RC_100
+    : > "$MOCK_CALL_LOG"
+    manager resume > /dev/null
+    assert_contains "retry starts the VM" "$(calls)" "qm start 100"
+}
+
+test_long_host_blocking_process_is_matched() {
+    # pgrep without -f matches comm, which the kernel truncates to 15 chars,
+    # so the shipped "unattended-upgrade" default could never match.
+    write_config <<'EOF'
+VM_IDS="100"
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_RUNNING_PROCS="unattended-upgrade"
+
+    local out; out="$(monitor check)"
+    assert_contains "long name still detected" "$out" "Host Blocking Processes: DETECTED"
+    assert_contains "blocks sleep"             "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_invalid_action_status_names_the_fallback() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION=hibernte
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out; out="$(manager status)"
+    assert_contains     "names the real fallback" "$out" "INVALID — will fall back to hibernate"
+    assert_not_contains "does not claim ignored"  "$out" "left running"
+}
+
+test_duplicate_ids_acted_on_once() {
+    # pre_sleep never validates, so the dedupe has to happen at hydration.
+    # Otherwise the second pass overwrote vm_100=shutdown with not_running.
+    write_config <<'EOF'
+VM_IDS="100 100"
+VM_100_SLEEP_ACTION="shutdown"
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    manager pre-sleep > /dev/null
+    local st; st="$(read_state)"
+    assert_contains     "recorded as shutdown"    "$st" "vm_100=shutdown"
+    assert_not_contains "not clobbered by pass 2" "$st" "not_running"
+
+    : > "$MOCK_CALL_LOG"
+    manager post-wake > /dev/null
+    assert_contains "still resumes" "$(calls)" "qm start 100"
+}
+
 test_unknown_sleep_action_falls_back_safely() {
     # pre_sleep runs in a process that never validates config, so an unknown
     # action must still stop the VM. It used to record "ignored" and leave a
@@ -1092,6 +1166,10 @@ run_test "wake/effective-idle-clamped"           test_effective_idle_clamped_to_
 run_test "config/no-instances"                   test_no_instances_configured_is_a_config_error
 run_test "config/bad-idle-threshold"             test_bad_idle_threshold_is_a_config_error
 run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls_back_safely
+run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
+run_test "cycle/duplicate-ids-acted-once"        test_duplicate_ids_acted_on_once
+run_test "host/long-blocking-process-name"       test_long_host_blocking_process_is_matched
+run_test "config/invalid-action-names-fallback"  test_invalid_action_status_names_the_fallback
 run_test "cycle/lingering-guest-process"         test_lingering_guest_process_blocks_hibernate_confirmation
 run_test "flags/non-numeric-monitor"             test_non_numeric_monitor_flag_still_monitors
 run_test "flags/non-numeric-resume"              test_non_numeric_resume_flag_still_resumes

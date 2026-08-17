@@ -344,7 +344,13 @@ CONTAINER_<id>_GPU_IDLE_THRESHOLD=10  # optional override
 
 ### Configuration Validation
 
-Scripts validate configuration at startup:
+Validation belongs to the idle monitor: it is the long-running daemon, so a bad
+config there is worth refusing to start over. `proxmox-sleep-manager.sh` runs as
+a systemd sleep hook, re-reads the config on every invocation and validates
+nothing — it must act on whatever it finds, so unrecognised values fall back to
+the safe default rather than aborting the suspend.
+
+`proxmox-idle-monitor.sh start` validates:
 - All listed VM IDs exist (`qm status`)
 - All listed container IDs exist (`pct status`)
 - At least one VM or container is configured

@@ -48,6 +48,20 @@ get_cfg() {
 # Hydrate legacy single-VM config into the multi-instance form when needed.
 # If the user's config still sets only the old VMID= / VM_NAME= / GAMING_PROCESSES=
 # variables and no VM_IDS / CONTAINER_IDS, synthesize a single VM entry.
+# Drop repeated IDs from the named variable, preserving order. Walking one
+# twice makes the second pass overwrite the state the first recorded, leaving
+# the instance stopped on wake. This process never validates its config, so the
+# lists have to be safe by construction.
+dedupe_ids() {
+    local var="$1" id out=""
+    # shellcheck disable=SC2086  # the ID list is space-separated on purpose
+    for id in ${!var}; do
+        [[ " $out " == *" $id "* ]] && continue
+        out+="${out:+ }$id"
+    done
+    printf -v "$var" '%s' "$out"
+}
+
 hydrate_legacy_config() {
     VM_IDS="${VM_IDS:-}"
     CONTAINER_IDS="${CONTAINER_IDS:-}"
@@ -63,6 +77,8 @@ hydrate_legacy_config() {
         printf -v "VM_${VMID}_CHECK_POWER_REQUESTS" '%s' "1"
         printf -v "VM_${VMID}_CHECK_USER_IDLE" '%s' "1"
     fi
+    dedupe_ids VM_IDS
+    dedupe_ids CONTAINER_IDS
 }
 hydrate_legacy_config
 
@@ -385,6 +401,7 @@ post_wake() {
     fi
 
     local overall_rc=0 line key value kind id resume_flag
+    local unresumed=()
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
@@ -413,7 +430,10 @@ post_wake() {
                 # Off only when explicitly 0, so a typo resumes the instance
                 # rather than leaving the user's session stopped.
                 if [[ "$resume_flag" != "0" ]]; then
-                    resume_instance "$kind" "$id" || overall_rc=$?
+                    if ! resume_instance "$kind" "$id"; then
+                        overall_rc=$?
+                        unresumed+=("$line")
+                    fi
                 else
                     log "$kind $id: RESUME_ON_WAKE=$resume_flag, leaving stopped"
                 fi
@@ -430,7 +450,15 @@ post_wake() {
         esac
     done < "$STATE_FILE"
 
-    rm -f "$STATE_FILE"
+    # An instance that failed to come back keeps its entry: the state file is
+    # the only record of what still needs starting, and `resume` re-reads it.
+    # Entries that resumed are dropped so a retry does not restart them.
+    if [[ ${#unresumed[@]} -eq 0 ]]; then
+        rm -f "$STATE_FILE"
+    else
+        printf '%s\n' "${unresumed[@]}" > "$STATE_FILE"
+        log "${#unresumed[@]} instance(s) did not resume; run 'resume' to retry once the cause is fixed"
+    fi
 
     log "=== POST-WAKE HOOK COMPLETE (exit: $overall_rc) ==="
     return $overall_rc
@@ -449,12 +477,12 @@ resume_all() {
     post_wake
 }
 
-# Annotate an unrecognised sleep action rather than printing it as configured —
-# pre_sleep treats it as "ignore", which is not what the typo looks like.
+# Annotate an unrecognised sleep action rather than printing it as configured.
+# $2 is the fallback pre_sleep will actually apply, which differs by kind.
 describe_action() {
     case "$1" in
         hibernate|shutdown|keep_running|ignore) printf '%s\n' "$1" ;;
-        *) printf '%s (INVALID — will be ignored, instance left running)\n' "$1" ;;
+        *) printf '%s (INVALID — will fall back to %s)\n' "$1" "$2" ;;
     esac
 }
 
@@ -481,7 +509,7 @@ status() {
         else
             echo "  Status:        STOPPED"
         fi
-        echo "  Sleep action:  $(describe_action "$action")"
+        echo "  Sleep action:  $(describe_action "$action" hibernate)"
         echo "  Resume on wake: $resume"
         echo ""
     done
@@ -496,7 +524,7 @@ status() {
         else
             echo "  Status:        STOPPED"
         fi
-        echo "  Sleep action:  $(describe_action "$action")"
+        echo "  Sleep action:  $(describe_action "$action" shutdown)"
         echo "  Resume on wake: $resume"
         echo ""
     done

@@ -58,6 +58,25 @@ get_cfg() {
 # ── Legacy shim ────────────────────────────────────────────────────────────────
 # If only the old VMID=... style config is present, synthesize one VM entry.
 
+# Drop repeated IDs from the named variable, preserving order. Walking one
+# twice makes the second pass overwrite the state the first recorded, leaving
+# the instance stopped on wake; sleep-now suspends without running
+# validate_config, so the lists must be safe here and not only at daemon start.
+# What was dropped is recorded so validate_config can still name the typo.
+DUPLICATE_IDS=""
+dedupe_ids() {
+    local var="$1" id out=""
+    # shellcheck disable=SC2086  # the ID list is space-separated on purpose
+    for id in ${!var}; do
+        if [[ " $out " == *" $id "* ]]; then
+            DUPLICATE_IDS+="${DUPLICATE_IDS:+ }$id"
+            continue
+        fi
+        out+="${out:+ }$id"
+    done
+    printf -v "$var" '%s' "$out"
+}
+
 hydrate_legacy_config() {
     VM_IDS="${VM_IDS:-}"
     CONTAINER_IDS="${CONTAINER_IDS:-}"
@@ -76,6 +95,8 @@ hydrate_legacy_config() {
         printf -v "VM_${VMID}_CHECK_POWER_REQUESTS" '%s' "1"
         printf -v "VM_${VMID}_CHECK_USER_IDLE"      '%s' "1"
     fi
+    dedupe_ids VM_IDS
+    dedupe_ids CONTAINER_IDS
 }
 hydrate_legacy_config
 
@@ -154,14 +175,10 @@ validate_config() {
         errors=$((errors + 1))
     fi
 
-    # A repeated ID is walked twice: the second pass sees the instance the
-    # first pass just stopped and overwrites its state with "not_running",
-    # so post_wake leaves it stopped.
-    local dupes
-    # shellcheck disable=SC2086  # the ID lists are space-separated on purpose
-    dupes=$(printf '%s\n' $VM_IDS $CONTAINER_IDS | sort | uniq -d | tr '\n' ' ')
-    if [[ -n "${dupes// /}" ]]; then
-        echo "ERROR: duplicate instance IDs in VM_IDS/CONTAINER_IDS: ${dupes% }" >&2
+    # hydrate_legacy_config already dropped these so no code path acts on an ID
+    # twice, but the typo is still worth surfacing rather than silently fixing.
+    if [[ -n "$DUPLICATE_IDS" ]]; then
+        echo "ERROR: duplicate instance IDs in VM_IDS/CONTAINER_IDS: $DUPLICATE_IDS" >&2
         errors=$((errors + 1))
     fi
 
@@ -229,14 +246,23 @@ ct_is_running() {
 }
 
 get_proxmox_node() {
+    # /etc/pve/nodes lists every node in the cluster, so picking the first
+    # entry returns whichever sorts first — not necessarily this host. The
+    # local hostname is the node name on Proxmox; the directory only confirms it.
     local node_name=""
+    node_name=$(hostname -s 2>/dev/null || hostname 2>/dev/null)
+    if [[ -n "$node_name" && -d "/etc/pve/nodes/$node_name" ]]; then
+        printf '%s\n' "$node_name"
+        return
+    fi
     if [[ -d /etc/pve/nodes ]]; then
-        node_name=$(ls -1 /etc/pve/nodes 2>/dev/null | head -n1)
+        local first; first=$(ls -1 /etc/pve/nodes 2>/dev/null | head -n1)
+        if [[ -n "$first" ]]; then
+            printf '%s\n' "$first"
+            return
+        fi
     fi
-    if [[ -z "$node_name" ]]; then
-        node_name=$(hostname -s 2>/dev/null || hostname 2>/dev/null)
-    fi
-    echo "$node_name"
+    printf '%s\n' "$node_name"
 }
 
 # ── VM-level check functions (guest-agent / pvesh) ─────────────────────────────
@@ -539,7 +565,11 @@ check_host_blocking_processes() {
     for proc in "${blocking_procs[@]}"; do
         proc=$(echo "$proc" | xargs)
         [[ -z "$proc" ]] && continue
-        if pgrep "$proc" > /dev/null 2>&1; then
+        # -f matches the full command line. Without it pgrep compares against
+        # comm, which the kernel truncates to 15 characters, and procps refuses
+        # a longer pattern outright — so the shipped "unattended-upgrade"
+        # default could never match. Same constraint the container path handles.
+        if pgrep -f -- "$proc" > /dev/null 2>&1; then
             debug "Found host blocking process: $proc"
             return 0
         fi

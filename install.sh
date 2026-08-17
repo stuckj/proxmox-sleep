@@ -192,7 +192,23 @@ echo "Enabling services..."
 systemctl enable proxmox-sleep-manager.service
 echo -e "${GREEN}✓ Sleep manager enabled (will hibernate VM before sleep)${NC}"
 
-if [[ -z "$VMID" && -z "$CTID" ]]; then
+# An existing config is deliberately left untouched above, so the answers to
+# the prompts say nothing about what is configured. Read the file before
+# claiming nothing is.
+CONFIGURED=0
+if [[ -n "$VMID" || -n "$CTID" ]]; then
+    CONFIGURED=1
+elif [[ $EXISTING_CONFIG -eq 1 ]]; then
+    if (
+        # shellcheck source=/dev/null
+        source /etc/proxmox-sleep.conf
+        [[ -n "${VM_IDS:-}${CONTAINER_IDS:-}${VMID:-}" ]]
+    ); then
+        CONFIGURED=1
+    fi
+fi
+
+if [[ $CONFIGURED -eq 0 ]]; then
     echo -e "${YELLOW}⚠ No VM or container configured — skipping idle monitor${NC}"
     echo -e "${YELLOW}  The idle monitor requires at least one VM or container to watch.${NC}"
     echo -e "${YELLOW}  Add VM_IDS or CONTAINER_IDS to /etc/proxmox-sleep.conf and then run:${NC}"

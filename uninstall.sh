@@ -6,7 +6,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/usr/local/bin"
-SYSTEMD_DIR="/etc/systemd/system"
+SYSTEMD_DIR="/lib/systemd/system"
 CONFIG_FILE="/etc/proxmox-sleep.conf"
 
 # Colors

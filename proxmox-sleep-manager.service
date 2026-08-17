@@ -1,5 +1,5 @@
 [Unit]
-Description=Proxmox Sleep Manager - Hibernate Windows VM on sleep
+Description=Proxmox Sleep Manager - Hibernate VMs and stop containers on sleep
 Before=sleep.target
 StopWhenUnneeded=yes
 

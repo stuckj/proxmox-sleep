@@ -2,18 +2,37 @@
 #
 # Mock `pgrep`. Matches the pattern (last argument) against the comma-separated
 # MOCK_RUNNING_PROCS list as a substring, covering both call sites:
-#   pgrep <name>                    - host blocking process check
-#   pgrep -f "qemu.*-id <id> "      - lingering QEMU check in hibernate_vm
+#   pgrep -f "<name>"               - host blocking process check
+#   pgrep -f "(qemu|kvm).*-id <id> " - lingering guest check in hibernate_vm
 # Default: nothing is running, so hibernation confirms cleanly.
+#
+# Without -f, real pgrep compares against comm, which the kernel truncates to
+# TASK_COMM_LEN-1 = 15 characters, and procps refuses a longer pattern with a
+# warning and zero matches. Both are modelled here so a caller that forgets -f
+# fails the way it would on a real host.
 
 set -uo pipefail
 
+full_cmdline=0
+for arg in "$@"; do
+    case "$arg" in
+        -*f*) full_cmdline=1 ;;
+    esac
+done
+
 pattern="${!#}"
+
+if [[ $full_cmdline -eq 0 && ${#pattern} -gt 15 ]]; then
+    echo "pgrep: pattern that searches for process name longer than 15 characters will result in zero matches" >&2
+    exit 1
+fi
 
 IFS=',' read -ra procs <<< "${MOCK_RUNNING_PROCS:-}"
 for p in "${procs[@]}"; do
     p="$(echo "$p" | xargs)"
     [[ -z "$p" ]] && continue
+    # Without -f only the truncated comm is visible to the match.
+    [[ $full_cmdline -eq 0 ]] && p="${p:0:15}"
     if [[ "$pattern" == *"$p"* || "$p" == *"$pattern"* ]]; then
         echo 12345
         exit 0
