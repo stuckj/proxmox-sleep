@@ -78,7 +78,9 @@ fi
 read -rp "Auto-sleep after how many idle minutes? [15]: " idle_mins
 IDLE_MINUTES=${idle_mins:-15}
 
-if [[ ! "$IDLE_MINUTES" =~ ^[0-9]+$ ]]; then
+# Leading zeros are rejected here too: the daemon reads this value with `-ge`,
+# where a leading zero means octal, so 08 errors and 010 silently means 8.
+if [[ ! "$IDLE_MINUTES" =~ ^(0|[1-9][0-9]*)$ ]]; then
     echo -e "${RED}Error: Idle threshold must be a non-negative integer (got: '$IDLE_MINUTES')${NC}"
     exit 1
 fi

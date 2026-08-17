@@ -212,7 +212,7 @@ validate_config() {
         fi
     done
 
-    if ! [[ "$IDLE_THRESHOLD_MINUTES" =~ ^[0-9]+$ ]]; then
+    if ! is_positive_int "$IDLE_THRESHOLD_MINUTES"; then
         echo "ERROR: IDLE_THRESHOLD_MINUTES must be a non-negative integer (current: '$IDLE_THRESHOLD_MINUTES')" >&2
         errors=$((errors + 1))
     fi

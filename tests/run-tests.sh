@@ -924,6 +924,36 @@ EOF
     assert_contains "names the setting" "$out" "CPU_IDLE_THRESHOLD must be a non-negative integer"
 }
 
+test_leading_zero_idle_threshold_is_a_config_error() {
+    # 08 errors under -ge (invalid octal) so the host never sleeps; 010 is read
+    # as 8 and it sleeps early. Both must be refused rather than run.
+    write_config <<'EOF'
+VM_IDS="100"
+IDLE_THRESHOLD_MINUTES=08
+EOF
+    export MOCK_QM_STATUS_100=running
+
+    local out rc
+    out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
+    assert_rc "exits with EX_CONFIG"    "$rc" "78"
+    assert_contains "names the setting" "$out" "IDLE_THRESHOLD_MINUTES must be a non-negative integer"
+}
+
+test_block_weak_inhibitor_does_not_block() {
+    # block-weak exists to be overridden by a privileged caller, which is what
+    # this is. Treating it as blocking would stop the host ever sleeping while a
+    # desktop session holds one.
+    write_config <<'EOF'
+VM_IDS="100"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_INHIBITORS="GNOME Session 1000 user 2200 gnome-session sleep session is active block-weak"
+
+    local out; out="$(monitor check)"
+    assert_contains "weak inhibitor ignored" "$out" "Sleep Inhibitors: none"
+    assert_contains "still idle"             "$out" "Overall Idle Status: IDLE"
+}
+
 test_pending_survives_instance_leaving_config() {
     # An ID removed from VM_IDS while still awaiting resume is visited by no
     # loop, so nothing would carry its record forward.
@@ -1814,6 +1844,8 @@ run_test "cycle/unknown-action-falls-back-safe"  test_unknown_sleep_action_falls
 run_test "cycle/failed-resume-keeps-state"       test_failed_resume_keeps_state_for_retry
 run_test "cycle/failed-resume-survives-cycle"    test_failed_resume_survives_next_sleep_cycle
 run_test "config/leading-zero-threshold"         test_leading_zero_threshold_is_a_config_error
+run_test "config/leading-zero-idle-threshold"    test_leading_zero_idle_threshold_is_a_config_error
+run_test "host/block-weak-inhibitor-ignored"     test_block_weak_inhibitor_does_not_block
 run_test "cycle/pending-survives-deconfigured"   test_pending_survives_instance_leaving_config
 run_test "cycle/pending-ignored-when-running"    test_pending_ignored_while_instance_is_running
 run_test "config/effective-resume-flag"          test_status_shows_effective_resume_flag

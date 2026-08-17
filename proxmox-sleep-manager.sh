@@ -577,9 +577,6 @@ resume_all() {
     post_wake
 }
 
-# Print the configured action alongside what pre_sleep will actually do, which
-# differs by kind: LXC cannot hibernate, and an unrecognised value falls back to
-# the kind's default rather than being left alone.
 # post_wake resumes unless the value is exactly 0, so printing the raw string
 # would read as the opposite of what happens for anything else.
 describe_resume() {
@@ -590,6 +587,9 @@ describe_resume() {
     esac
 }
 
+# Print the configured action alongside what pre_sleep will actually do, which
+# differs by kind: LXC cannot hibernate, and an unrecognised value falls back to
+# the kind's default rather than being left alone.
 describe_action() {
     local action="$1" kind="$2"
     case "$kind:$action" in
