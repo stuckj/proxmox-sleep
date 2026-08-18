@@ -413,9 +413,9 @@ same failure.
 
 ## Future Considerations
 
-See [TODO.md](../TODO.md) for detailed specifications on planned major enhancements.
+Planned work is tracked in [GitHub issues](https://github.com/stuckj/proxmox-sleep/issues).
 
-1. **Agent-Based Architecture** (detailed in TODO.md):
+1. **Agent-Based Architecture** ([#11](https://github.com/stuckj/proxmox-sleep/issues/11)):
    - Delegate idle detection to in-VM/container agent processes
    - Cross-platform agents: Windows (enhance existing), Linux (GUI + CLI), macOS (via SSH)
 
