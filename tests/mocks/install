@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# Mock `install` that drops the -o/-g ownership flags before delegating to the
+# real binary. The scripts create their state directory with
+# `install -d -m 0755 -o root -g root`, which requires privileges the test
+# runner does not (and should not) have. Only the chown is stubbed out — the
+# directory is still really created, with the requested mode.
+
+set -uo pipefail
+
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|-g|--owner|--group) shift 2 ;;
+        --owner=*|--group=*)   shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+
+exec /usr/bin/install "${args[@]}"

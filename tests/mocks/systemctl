@@ -1,0 +1,34 @@
+#!/bin/bash
+#
+# Mock `systemctl`. `is-active --quiet <unit>` consults the comma-separated
+# MOCK_ACTIVE_UNITS list; `suspend` is recorded in the call log instead of
+# actually suspending the machine running the tests.
+
+set -uo pipefail
+
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'systemctl %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+cmd="${1:-}"
+
+case "$cmd" in
+    is-active)
+        unit=""
+        for arg in "$@"; do
+            case "$arg" in
+                is-active|--quiet) ;;
+                *) unit="$arg" ;;
+            esac
+        done
+        IFS=',' read -ra active <<< "${MOCK_ACTIVE_UNITS:-}"
+        for a in "${active[@]}"; do
+            [[ "$(echo "$a" | xargs)" == "$unit" ]] && exit 0
+        done
+        exit 3
+        ;;
+    suspend)
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac

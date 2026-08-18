@@ -1,10 +1,11 @@
 # Proxmox Sleep Manager
 
-Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.
+Automated power management for Proxmox hosts with Windows VMs, LXC containers, and GPU passthrough.
 
 ## The Problem
 
 - Gaming desktop runs Proxmox with Windows 11 VM + GPU passthrough
+- May also run Linux LXC containers (e.g., Steam gaming container)
 - Machine draws ~150W idle, but only used a few hours per week
 - Native sleep (S3) with GPU passthrough often causes issues (crashes, ZFS corruption)
 - Windows VM suspend via QEMU doesn't survive host sleep
@@ -14,7 +15,7 @@ Automated power management for Proxmox hosts with Windows VMs and GPU passthroug
 
 This project provides two components:
 
-1. **Sleep Manager**: Automatically hibernates the Windows VM before host sleep and resumes it after wake
+1. **Sleep Manager**: Automatically hibernates VMs and shuts down containers before host sleep, and resumes them after wake
 2. **Idle Monitor**: Detects when the system is truly idle and triggers sleep
 
 ### How It Works
@@ -22,26 +23,25 @@ This project provides two components:
 ```
 Host Going to Sleep:
 ┌─────────────┐    ┌──────────────────┐    ┌─────────────┐    ┌────────────┐
-│ systemctl   │───>│ sleep-manager    │───>│ Windows     │───>│ Host       │
-│ suspend     │    │ (pre-sleep hook) │    │ hibernates  │    │ sleeps     │
+│ systemctl   │───>│ sleep-manager    │───>│ VMs hibernate│───>│ Host       │
+│ suspend     │    │ (pre-sleep hook) │    │ CTs shutdown │    │ sleeps     │
 └─────────────┘    └──────────────────┘    └─────────────┘    └────────────┘
 
 Host Waking Up:
 ┌─────────────┐    ┌──────────────────┐    ┌─────────────┐
-│ Host wakes  │───>│ sleep-manager    │───>│ VM starts   │
-│             │    │ (post-wake hook) │    │ (resumes    │
-│             │    │                  │    │ from hib.)  │
+│ Host wakes  │───>│ sleep-manager    │───>│ VMs start   │
+│             │    │ (post-wake hook) │    │ CTs start   │
 └─────────────┘    └──────────────────┘    └─────────────┘
 ```
 
-Windows hibernation writes RAM to disk, so when the VM starts, it resumes exactly where it left off.
+Windows hibernation writes RAM to disk; when the VM starts it resumes exactly where it left off. LXC containers are shut down cleanly and started fresh on wake.
 
 ## Requirements
 
 - Proxmox VE (tested on 7.x and 8.x)
-- Windows VM with QEMU Guest Agent installed
-- Hibernation enabled in Windows (usually is by default)
-- GPU passthrough with NVIDIA or AMD graphics card
+- For Windows VMs: QEMU Guest Agent installed, hibernation enabled
+- For LXC containers: no special requirements
+- GPU passthrough with NVIDIA or AMD graphics card (optional)
 
 ### Enabling Windows Hibernation
 
@@ -91,7 +91,7 @@ After installation, configure the package:
 # Copy the example config
 cp /usr/share/doc/proxmox-sleep/examples/proxmox-sleep.conf.example /etc/proxmox-sleep.conf
 
-# Edit the config and set your VM ID
+# Edit the config — set your VM IDs and/or container IDs
 nano /etc/proxmox-sleep.conf
 
 # Enable the idle monitor (sleep manager is already enabled)
@@ -109,7 +109,7 @@ cd proxmox-sleep
 ./install.sh
 ```
 
-### Step 2: Install Windows Idle Helper (Required)
+### Step 2: Install Windows Idle Helper (Required for VMs)
 
 > **Important**: This step is required for proper keyboard/mouse idle detection with USB passthrough devices.
 
@@ -117,7 +117,8 @@ The QEMU guest agent runs as SYSTEM in Windows session 0, which cannot detect us
 
 From the Proxmox host, run:
 ```bash
-proxmox-idle-monitor.sh install-helper
+proxmox-idle-monitor.sh install-helper          # single VM
+proxmox-idle-monitor.sh install-helper <VMID>    # specific VM
 ```
 
 This installs a Windows scheduled task that:
@@ -126,46 +127,43 @@ This installs a Windows scheduled task that:
 - Updates idle time every 10 seconds
 - Can be exited by right-clicking the tray icon
 
-The tray icon appears as an "i" (information) icon and shows "Idle: Xm Ys" when you hover over it.
-
 ## Usage
 
 ### Check Status
+
+All subcommands need root: runtime state lives in `/run/proxmox-sleep`, which is
+root-owned so unprivileged users cannot plant symlinks in it.
+
 ```bash
 # Full status with idle tracking info
-proxmox-idle-monitor.sh status
+sudo proxmox-idle-monitor.sh status
 
 # Quick idle check (for testing)
-proxmox-idle-monitor.sh check
+sudo proxmox-idle-monitor.sh check
 
 # Detailed debug output
-DEBUG=1 proxmox-idle-monitor.sh check
+sudo DEBUG=1 proxmox-idle-monitor.sh check
 
-# Sleep manager status
-proxmox-sleep-manager.sh status
+# Sleep manager status (shows all configured instances)
+sudo proxmox-sleep-manager.sh status
 ```
 
 ### Sleep Now (Manual Sleep)
 ```bash
-# Immediately hibernate VM and sleep the host
+# Immediately hibernate VMs, shut down containers, and sleep the host
 proxmox-idle-monitor.sh sleep-now
 ```
 
-This is useful for:
-- Testing the sleep/wake cycle
-- Manually sleeping the machine without waiting for idle timeout
-- Quick shutdown when leaving
-
 ### Other Operations
 ```bash
-# Hibernate the VM only (without sleeping host)
+# Hibernate/shutdown all instances without sleeping host
 proxmox-sleep-manager.sh hibernate
 
 # Reset idle tracking (restart the countdown)
 proxmox-idle-monitor.sh reset
 
 # Reinstall Windows idle helper
-proxmox-idle-monitor.sh install-helper
+proxmox-idle-monitor.sh install-helper [VMID]
 
 # Wake: use Wake-on-LAN or press power button
 ```
@@ -178,49 +176,64 @@ tail -f /var/log/proxmox-idle-monitor.log
 
 ## Configuration
 
-All settings can be configured in `/etc/proxmox-sleep.conf`:
+All settings are in `/etc/proxmox-sleep.conf`. The config supports multiple VMs and LXC containers with per-instance settings.
+
+### Multi-Instance Format
 
 ```bash
-# VM Configuration
-VMID=100                          # Your Windows VM ID
-VM_NAME="windows"                 # VM name (for logging only)
+# Global settings
+IDLE_THRESHOLD_MINUTES=15
+CHECK_INTERVAL=60
+CPU_IDLE_THRESHOLD=15
+GPU_IDLE_THRESHOLD=10
+GPU_VENDOR=auto
+CHECK_SSH_SESSIONS=1
+HIBERNATE_TIMEOUT=300
+SHUTDOWN_TIMEOUT=120
+WAKE_DELAY=5
+WAKE_GRACE_PERIOD=60
 
-# Idle Monitor Settings
-IDLE_THRESHOLD_MINUTES=15         # Minutes of idle before auto-sleep (0 to disable)
-CHECK_INTERVAL=60                 # How often to check idle status (seconds)
-CPU_IDLE_THRESHOLD=15             # VM CPU % above this = active
-GPU_IDLE_THRESHOLD=10             # GPU % above this = active
-GPU_VENDOR=auto                   # nvidia, amd, or auto
-CHECK_SSH_SESSIONS=1              # Prevent sleep if SSH sessions active (1=on, 0=off)
+# Instance lists (space-separated Proxmox IDs)
+VM_IDS="100"
+CONTAINER_IDS="200"
 
-# Hibernation Settings
-HIBERNATE_TIMEOUT=300             # Max seconds to wait for Windows hibernation
-WAKE_DELAY=5                      # Seconds to wait after wake before starting VM
-WAKE_GRACE_PERIOD=60              # Seconds after wake before allowing sleep again
+# Per-VM settings
+VM_100_NAME="windows-gaming"
+VM_100_MONITOR=1
+VM_100_SLEEP_ACTION=hibernate        # hibernate | shutdown | keep_running | ignore
+VM_100_RESUME_ON_WAKE=1
+VM_100_GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,..."
+VM_100_CHECK_POWER_REQUESTS=1
+VM_100_CHECK_USER_IDLE=1
 
-# Gaming Process Detection (in Windows VM)
-# Set to "" to disable
-GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,..."
-
-# Host Blocking Processes (on Proxmox host)
-# Sleep is prevented when these processes are running on the host
-# Set to "" to disable
-HOST_BLOCKING_PROCESSES="unattended-upgrade"
-
-# Host Blocking Systemd Units
-# Sleep is prevented when these systemd units are active (for oneshot services)
-# Set to "" to disable
-HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
-
-# Sleep Inhibitor Detection
-# Check for systemd sleep inhibitors (e.g., media players, file transfers)
-CHECK_SLEEP_INHIBITORS=1              # 1=on, 0=off
-
-# Logging
-SLEEP_MANAGER_LOG="/var/log/proxmox-sleep-manager.log"
-IDLE_MONITOR_LOG="/var/log/proxmox-idle-monitor.log"
-DEBUG=0                           # Set to 1 for verbose logging
+# Per-container settings
+CONTAINER_200_NAME="steam-linux"
+CONTAINER_200_MONITOR=1
+CONTAINER_200_SLEEP_ACTION=shutdown  # shutdown | keep_running | ignore
+CONTAINER_200_RESUME_ON_WAKE=1
+CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,proton,gamescope"
 ```
+
+### Legacy Format (Backward Compatible)
+
+If `VM_IDS` is empty and the old `VMID=` is set, the scripts automatically synthesize a single VM entry with legacy defaults. Existing configs continue to work without changes, including after you add `CONTAINER_IDS` — adding a container does not disturb the legacy VM entry.
+
+```bash
+VMID=100
+VM_NAME="windows"
+GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,..."
+```
+
+### Per-Instance Sleep Actions
+
+| Action | VMs | Containers | Description |
+|--------|-----|------------|-------------|
+| `hibernate` | Yes | No* | Send `shutdown /h` via guest agent (Windows) |
+| `shutdown` | Yes | Yes | Graceful shutdown via `qm shutdown` / `pct shutdown` |
+| `keep_running` | Yes | Yes | Leave running through host sleep |
+| `ignore` | Yes | Yes | Don't touch this instance |
+
+\* If `hibernate` is set for a container, it is treated as `shutdown`.
 
 See `proxmox-sleep.conf.example` for the complete reference.
 
@@ -228,21 +241,39 @@ Environment variables override config file settings, which override defaults.
 
 ## Idle Detection
 
-The idle monitor checks multiple signals:
+The idle monitor checks multiple signals. **All** must indicate idle for the configured duration before triggering sleep.
+
+### Host-Level Checks (Always Run)
 
 | Check | Method | Notes |
 |-------|--------|-------|
-| VM CPU Usage | Proxmox API | Above threshold = active |
-| GPU Usage | Guest Agent (nvidia-smi/perf counters) | NVIDIA, AMD supported |
-| Windows Idle Time | Tray Helper App | Requires install-helper |
-| Windows Power Requests | Guest Agent (powercfg) | Media players, downloads, etc. |
-| Gaming Processes | Guest Agent (Get-Process) | Configurable process list |
 | SSH Sessions | Host `who` command | Optional, can disable |
 | Host Blocking Processes | Host `pgrep` | e.g., unattended-upgrade |
 | Host Blocking Units | `systemctl is-active` | apt-daily, apt-daily-upgrade |
 | Sleep Inhibitors | `systemd-inhibit --list` | Media players, file transfers |
 
-All must indicate "idle" for the configured duration before triggering sleep.
+### VM Checks (Per Monitored VM, When Running)
+
+| Check | Method | Notes |
+|-------|--------|-------|
+| VM CPU Usage | Proxmox API (`pvesh`) | Above threshold = active |
+| GPU Usage | Guest Agent (nvidia-smi / perf counters) | Queried inside the VM |
+| Windows Idle Time | Tray Helper App | Requires install-helper |
+| Gaming Processes | Guest Agent (`Get-Process`) | Configurable list |
+| Windows Power Requests | Guest Agent (`powercfg`) | Media players, downloads |
+
+### Container Checks (Per Monitored Container, When Running)
+
+| Check | Method | Notes |
+|-------|--------|-------|
+| Container CPU Usage | Proxmox API (`pvesh`) | Above threshold = active |
+| GPU Usage | Host `nvidia-smi` | Gracefully degrades if unavailable |
+| Gaming Processes | `pct exec` / `ps` | Configurable list |
+
+### GPU Detection Notes
+
+- **Windows VMs**: GPU is queried *inside* the VM via the QEMU guest agent, because the host-side GPU driver is replaced by vfio-pci during passthrough — `nvidia-smi` on the host sees nothing while the VM runs.
+- **LXC Containers**: GPU is queried on the host via `nvidia-smi`. This naturally returns no data when the GPU is bound to vfio-pci (VM running), which is the correct behavior (container GPU check reports "no signal").
 
 ### Windows Idle Helper
 
@@ -256,33 +287,25 @@ The helper runs silently with a system tray icon. If the icon is missing, reinst
 proxmox-idle-monitor.sh install-helper
 ```
 
-### Power Request Filtering
-
-Windows applications can request the system stay awake (e.g., media players, downloads). The idle monitor detects these via `powercfg /requests`.
-
-Some system-level requests are filtered as noise:
-- "Legacy Kernel Caller" - AMD CPU power management
-- "Sleep Idle State Disabled" - System idle tracking
-
-These don't indicate real user activity and are ignored.
-
-### GPU Detection
-
-- **NVIDIA**: Uses `nvidia-smi` inside the Windows VM
-- **AMD**: Uses Windows performance counters
-- **Auto** (default): Tries NVIDIA first, then AMD, then generic Windows counters
-
 ### Customizing Gaming Detection
 
 Edit `/etc/proxmox-sleep.conf`:
 
 ```bash
-# Customize the process list (include any launchers or games you want detected)
-GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,GalaxyClient.exe,Cyberpunk2077.exe,eldenring.exe"
+# Windows VM gaming processes
+VM_100_GAMING_PROCESSES="steam.exe,EpicGamesLauncher.exe,Cyberpunk2077.exe"
 
-# Or disable gaming process detection entirely
-GAMING_PROCESSES=""
+# Linux container gaming processes
+CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,gamescope"
+
+# Disable gaming detection for an instance
+VM_100_GAMING_PROCESSES=""
 ```
+
+Matching is **case-insensitive and exact** — not substring. Configuring `steam`
+matches only a process literally named `steam`, not `steamwebhelper`. If you want
+to block sleep while helper processes are running too, add them explicitly to the
+list. For Windows VMs the `.exe` suffix is stripped automatically before matching.
 
 ## Trying Native Sleep Instead
 
@@ -315,24 +338,23 @@ DEBUG=1 proxmox-idle-monitor.sh check
 ### Windows Idle Time shows -1 or 99999
 The Windows idle helper isn't running or isn't installed:
 ```bash
-# Install/reinstall the helper
 proxmox-idle-monitor.sh install-helper
 ```
 
 Then log out and back in to Windows, or check Task Scheduler for "ProxmoxIdleHelper".
 
-### Tray icon not visible
-- Check Windows system tray overflow (click the ^ arrow)
-- The icon appears as an "i" (information icon)
-- Right-click to exit, then restart via Task Scheduler or re-run install-helper
+### Container gaming processes not detected
+- Test manually: `pct exec <CTID> -- ps -eo args=`
+- The monitor extracts the basename of argv[0] from each line (for example, `/usr/bin/steam` becomes `steam`). It uses full command lines rather than `comm` because the kernel truncates `comm` to 15 characters, which would miss longer names.
+- Ensure the names in `CONTAINER_<id>_GAMING_PROCESSES` match those basenames exactly (matching is case-insensitive but not substring).
 
 ### GPU usage not detected
 ```bash
-# Test NVIDIA detection
+# Test NVIDIA detection inside VM
 qm guest exec <VMID> -- cmd /c "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits"
 
-# Check GPU_VENDOR setting in config
-grep GPU_VENDOR /etc/proxmox-sleep.conf
+# Test host-side nvidia-smi (for containers)
+nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits
 ```
 
 ## Uninstalling

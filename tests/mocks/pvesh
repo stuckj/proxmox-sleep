@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# Mock `pvesh` for the offline test harness.
+# Only `pvesh get /nodes/<node>/{qemu,lxc}/<id>/status/current` is implemented.
+# CPU is expressed as the API's 0.0-1.0 fraction; the scripts multiply by 100.
+
+set -uo pipefail
+
+mock_env() {
+    local name="$1" def="${2:-}"
+    if [[ -n "${!name+x}" ]]; then printf '%s' "${!name}"; else printf '%s' "$def"; fi
+}
+
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'pvesh %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+[[ "${1:-}" == "get" ]] || exit 1
+path="${2:-}"
+
+kind=""
+id=""
+case "$path" in
+    */qemu/*/status/current) kind=vm; id="${path#*/qemu/}"; id="${id%%/*}" ;;
+    */lxc/*/status/current)  kind=ct; id="${path#*/lxc/}";  id="${id%%/*}" ;;
+    *) exit 1 ;;
+esac
+
+if [[ "$kind" == "vm" ]]; then
+    cpu=$(mock_env "MOCK_VM_CPU_$id" 0)
+else
+    cpu=$(mock_env "MOCK_CT_CPU_$id" 0)
+fi
+
+# A test can simulate an API failure with MOCK_PVESH_FAIL=1.
+[[ "$(mock_env MOCK_PVESH_FAIL 0)" == "1" ]] && exit 2
+
+printf '{"status":"running","cpu":%s,"mem":123456}\n' "$cpu"

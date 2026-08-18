@@ -20,11 +20,16 @@ CONFIG_FILE="/etc/proxmox-sleep.conf"
 ENABLE_IDLE_MONITOR=0
 
 if [[ -f "$CONFIG_FILE" ]]; then
-    # Source the config to check VMID
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 
-    # Check if VMID is set and VM exists
-    if [[ -n "${VMID:-}" ]] && qm status "$VMID" &>/dev/null; then
+    # prerm disables the idle monitor on every upgrade, so anything not
+    # re-enabled here stays off after `apt upgrade`. Accept the multi-instance
+    # format as well as legacy VMID=, or a working install silently stops
+    # sleeping the host.
+    if [[ -n "${VM_IDS:-}" || -n "${CONTAINER_IDS:-}" ]]; then
+        ENABLE_IDLE_MONITOR=1
+    elif [[ -n "${VMID:-}" ]] && qm status "$VMID" &>/dev/null; then
         ENABLE_IDLE_MONITOR=1
     fi
 fi

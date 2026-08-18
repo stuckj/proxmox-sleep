@@ -1,0 +1,33 @@
+#!/bin/bash
+#
+# Mock `ps` used *inside* the simulated container (see mocks/pct exec).
+# MOCK_PS_OUTPUT holds one full command line per line.
+#
+#   ps -eo args=   emits them verbatim, so the real awk + basename pipeline
+#                  under test sees paths and arguments.
+#   ps -eo comm=   emits argv[0]'s basename truncated to TASK_COMM_LEN-1 = 15
+#                  characters, the way the kernel reports it. The code must not
+#                  use this form: a process name longer than 15 characters
+#                  would stop matching.
+
+set -uo pipefail
+
+format=""
+for arg in "$@"; do
+    case "$arg" in
+        args=|-eoargs=)  format="args" ;;
+        comm=|-eocomm=)  format="comm" ;;
+    esac
+done
+
+if [[ "$format" == "comm" ]]; then
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        first="${line%% *}"
+        base="${first##*/}"
+        printf '%s\n' "${base:0:15}"
+    done <<< "${MOCK_PS_OUTPUT:-}"
+    exit 0
+fi
+
+printf '%s\n' "${MOCK_PS_OUTPUT:-}"

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/usr/local/bin"
-SYSTEMD_DIR="/etc/systemd/system"
+SYSTEMD_DIR="/lib/systemd/system"
 CONFIG_FILE="/etc/proxmox-sleep.conf"
 
 # Colors
@@ -74,8 +74,11 @@ rm -f /etc/logrotate.d/proxmox-sleep
 echo -e "${GREEN}✓ Logrotate config removed${NC}"
 
 echo "Removing state files..."
+rm -rf /run/proxmox-sleep
+# Clean up legacy /tmp state files from pre-/run versions
 rm -f /tmp/proxmox-sleep-manager.state
 rm -f /tmp/proxmox-idle-monitor.state
+rm -f /tmp/proxmox-idle-monitor.wake
 echo -e "${GREEN}✓ State files removed${NC}"
 
 echo ""

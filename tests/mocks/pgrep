@@ -1,0 +1,52 @@
+#!/bin/bash
+#
+# Mock `pgrep`. MOCK_RUNNING_PROCS is a comma-separated list of simulated
+# processes, each entry a full command line. Default: nothing is running, so
+# hibernation confirms cleanly.
+#
+#   pgrep <pattern>      matches against comm — the basename of argv[0], which
+#                        the kernel truncates to TASK_COMM_LEN-1 = 15 chars.
+#                        procps refuses a longer pattern outright.
+#   pgrep -f <pattern>   matches the pattern as an ERE against the whole
+#                        command line.
+#
+# The pattern is matched with grep -E against the candidate, never compared as
+# a string: a mock that tested the pattern text would report a match for any
+# pattern mentioning a process name, and could not fail.
+
+set -uo pipefail
+
+full_cmdline=0
+for arg in "$@"; do
+    case "$arg" in
+        -*f*) full_cmdline=1 ;;
+    esac
+done
+
+pattern="${!#}"
+
+if [[ $full_cmdline -eq 0 && ${#pattern} -gt 15 ]]; then
+    echo "pgrep: pattern that searches for process name longer than 15 characters will result in zero matches" >&2
+    exit 1
+fi
+
+rc=1
+IFS=',' read -ra procs <<< "${MOCK_RUNNING_PROCS:-}"
+for p in "${procs[@]}"; do
+    p="$(echo "$p" | xargs)"
+    [[ -z "$p" ]] && continue
+
+    if [[ $full_cmdline -eq 1 ]]; then
+        candidate="$p"
+    else
+        candidate="${p%% *}"      # argv[0]
+        candidate="${candidate##*/}"   # basename
+        candidate="${candidate:0:15}"  # comm truncation
+    fi
+
+    if grep -Eq -- "$pattern" <<< "$candidate"; then
+        echo 12345
+        rc=0
+    fi
+done
+exit $rc

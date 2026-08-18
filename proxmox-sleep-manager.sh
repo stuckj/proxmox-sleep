@@ -1,263 +1,660 @@
 #!/bin/bash
 #
 # Proxmox Sleep Manager
-# Manages Windows VM hibernation when host sleeps/wakes
+# Manages VM hibernation and LXC container shutdown when host sleeps/wakes.
+# Supports multiple VMs and containers — see proxmox-sleep.conf.example.
 #
 
 # Load configuration file if it exists
 CONFIG_FILE="${CONFIG_FILE:-/etc/proxmox-sleep.conf}"
+
+# Sourcing assigns, so a setting named in the config file would otherwise
+# overwrite the one inherited from the environment — the reverse of the
+# documented precedence. Snapshot the environment and reapply it afterwards.
+declare -A _ENV_SNAPSHOT=()
+while IFS= read -r _name; do
+    _ENV_SNAPSHOT["$_name"]="${!_name}"
+done < <(compgen -e)
+
 if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 fi
 
-# Configuration (env vars override config file, defaults as fallback)
-VMID="${PROXMOX_VMID:-${VMID:-100}}"
-VM_NAME="${PROXMOX_VM_NAME:-${VM_NAME:-windows-vm}}"
+for _name in "${!_ENV_SNAPSHOT[@]}"; do
+    printf -v "$_name" '%s' "${_ENV_SNAPSHOT[$_name]}"
+done
+unset _name _ENV_SNAPSHOT
+
+# Global settings (env vars override config file, defaults as fallback)
 HIBERNATE_TIMEOUT="${HIBERNATE_TIMEOUT:-300}"
+SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT:-120}"
 WAKE_DELAY="${WAKE_DELAY:-5}"
 LOG_FILE="${SLEEP_MANAGER_LOG:-/var/log/proxmox-sleep-manager.log}"
-STATE_FILE="/tmp/proxmox-sleep-manager.state"
+
+# Runtime state lives under /run/proxmox-sleep, a root-owned tmpfs directory.
+# Using /run instead of /tmp avoids symlink-planting attacks by unprivileged
+# users (everything here is written as root via `>`).
+# PROXMOX_SLEEP_STATE_DIR redirects this for the offline test harness only.
+# It is not a supported config knob: the systemd units run with a clean
+# environment, so nothing but a root-run test can set it.
+STATE_DIR="${PROXMOX_SLEEP_STATE_DIR:-/run/proxmox-sleep}"
+if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
+    echo "ERROR: Failed to create runtime state directory: $STATE_DIR" >&2
+    echo "       This must run as root — try: sudo $0 $*" >&2
+    exit 1
+fi
+STATE_FILE="$STATE_DIR/sleep-manager.state"
 
 # Logging
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-# Check if VM is running
+# A non-numeric timeout makes `[[ $waited -lt $HIBERNATE_TIMEOUT ]]` false on the
+# first pass, so the confirmation loop never runs and control drops into the
+# timeout branch — stopping a guest that was just told to hibernate. The idle
+# monitor rejects these at daemon start, but sleep-now, a hand-run pre-sleep and
+# a manual `systemctl suspend` never go through it, so fall back here too.
+sanitize_number() {
+    local name="$1" pattern="$2" fallback="$3"
+    # Separate statement: within a single `local`, ${!name} resolves before
+    # name is assigned.
+    local value="${!name}"
+    [[ "$value" =~ $pattern ]] && return 0
+    log "WARN: $name='$value' is not valid; using $fallback"
+    printf -v "$name" '%s' "$fallback"
+}
+sanitize_number HIBERNATE_TIMEOUT '^[1-9][0-9]*$' 300
+sanitize_number SHUTDOWN_TIMEOUT  '^[1-9][0-9]*$' 120
+sanitize_number WAKE_DELAY        '^[0-9]+$'      5
+
+# Read a config var with a default (uses bash indirect expansion)
+get_cfg() {
+    local var="$1" default="${2:-}"
+    local val="${!var-}"
+    # printf, not echo: a value starting with -n/-e would be parsed as an option.
+    printf '%s\n' "${val:-$default}"
+}
+
+# Synthesize a legacy default only where the user has said nothing. An explicit
+# VM_<id>_* in a half-migrated config must win over the shim.
+set_if_unset() {
+    local name="$1" value="$2"
+    [[ -n "${!name+x}" ]] && return 0
+    printf -v "$name" '%s' "$value"
+}
+
+# Drop repeated IDs from the named variable, preserving order. Walking one
+# twice makes the second pass overwrite the state the first recorded, leaving
+# the instance stopped on wake. This process never validates its config, so the
+# lists have to be safe by construction.
+dedupe_ids() {
+    local var="$1" id out=""
+    # shellcheck disable=SC2086  # the ID list is space-separated on purpose
+    for id in ${!var}; do
+        [[ " $out " == *" $id "* ]] && continue
+        out+="${out:+ }$id"
+    done
+    printf -v "$var" '%s' "$out"
+}
+
+hydrate_legacy_config() {
+    VM_IDS="${VM_IDS:-}"
+    CONTAINER_IDS="${CONTAINER_IDS:-}"
+    # Keyed on VM_IDS alone: a legacy install that adds CONTAINER_IDS must keep
+    # its VMID= entry, not lose the VM because a container appeared.
+    if [[ -z "$VM_IDS" && -n "${VMID:-}" ]]; then
+        VM_IDS="$VMID"
+        set_if_unset "VM_${VMID}_NAME"                 "${VM_NAME:-windows-vm}"
+        set_if_unset "VM_${VMID}_MONITOR"              "1"
+        set_if_unset "VM_${VMID}_SLEEP_ACTION"         "hibernate"
+        set_if_unset "VM_${VMID}_RESUME_ON_WAKE"       "1"
+        set_if_unset "VM_${VMID}_GAMING_PROCESSES"     "${GAMING_PROCESSES:-}"
+        set_if_unset "VM_${VMID}_CHECK_POWER_REQUESTS" "1"
+        set_if_unset "VM_${VMID}_CHECK_USER_IDLE"      "1"
+    fi
+    dedupe_ids VM_IDS
+    dedupe_ids CONTAINER_IDS
+}
+hydrate_legacy_config
+
+# --- VM / CT status helpers -------------------------------------------------
+
 vm_is_running() {
-    local status
-    status=$(qm status "$VMID" 2>/dev/null | awk '{print $2}')
+    local id="$1" status
+    status=$(qm status "$id" 2>/dev/null | awk '{print $2}')
     [[ "$status" == "running" ]]
 }
 
-# Check if guest agent is responsive
+ct_is_running() {
+    local id="$1" status
+    # `pct status <id>` prints "status: running" or "status: stopped"
+    status=$(pct status "$id" 2>/dev/null | awk '{print $2}')
+    [[ "$status" == "running" ]]
+}
+
+instance_is_running() {
+    local kind="$1" id="$2"
+    case "$kind" in
+        vm) vm_is_running "$id" ;;
+        ct) ct_is_running "$id" ;;
+    esac
+}
+
+# Check if guest agent is responsive for a given VM id
 guest_agent_ready() {
-    qm guest cmd "$VMID" ping &>/dev/null
+    local id="$1"
+    qm guest cmd "$id" ping &>/dev/null
 }
 
-# Wait for guest agent to be ready
-wait_for_guest_agent() {
-    local max_wait=${1:-60}
-    local waited=0
+# --- State file helpers -----------------------------------------------------
 
-    log "Waiting for guest agent (max ${max_wait}s)..."
-    while [[ $waited -lt $max_wait ]]; do
-        if guest_agent_ready; then
-            log "Guest agent is responsive"
-            return 0
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
+# Entries from the previous cycle that were never resumed, keyed by state key.
+declare -A PENDING_STATE=()
 
-    log "Guest agent not responsive after ${max_wait}s"
-    return 1
+load_pending_state() {
+    PENDING_STATE=()
+    [[ -f "$STATE_FILE" ]] || return 0
+    local line key value
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$value" in
+            hibernated|shutdown|was_shutdown) PENDING_STATE["$key"]="$value" ;;
+        esac
+    done < "$STATE_FILE"
 }
 
-# Get Windows power state via guest agent
-get_windows_power_state() {
-    # Try to execute a simple command - if it works, Windows is awake
-    if qm guest exec "$VMID" -- powershell -Command "echo 'awake'" &>/dev/null; then
-        echo "awake"
+# An instance that is already stopped may be one an earlier cycle stopped and
+# failed to resume. Recording not_running would mean "leave it stopped" and
+# destroy the only record that it still needs starting.
+state_set_stopped() {
+    local key="$1" pending="${PENDING_STATE[$1]:-}"
+    if [[ -n "$pending" ]]; then
+        log "$key is still awaiting resume from an earlier cycle; keeping '$pending'"
+        state_set "$key" "$pending"
     else
-        echo "unknown"
+        state_set "$key" "not_running"
     fi
 }
 
-# Hibernate Windows VM via guest agent
-hibernate_vm() {
-    log "Initiating Windows hibernation for VM $VMID ($VM_NAME)..."
+# keep_running and ignore mean "do not touch it this cycle". If an earlier cycle
+# stopped the instance and never got it back, its pending record is the only note
+# that it still owes the user a start, and must outlive a cycle that leaves it
+# alone — otherwise post_wake reads "no action" and it stays down for good.
+state_set_untouched() {
+    local kind="$1" id="$2" value="$3"
+    local key="${kind}_${id}" pending="${PENDING_STATE[${1}_${2}]:-}"
+    if [[ -n "$pending" ]] && ! instance_is_running "$kind" "$id"; then
+        log "$key is still awaiting resume from an earlier cycle; keeping '$pending'"
+        state_set "$key" "$pending"
+        return
+    fi
+    state_set "$key" "$value"
+}
 
-    if ! vm_is_running; then
-        log "VM is not running, nothing to hibernate"
-        echo "not_running" > "$STATE_FILE"
+state_set() {
+    # Upsert key=value into state file. Removes any prior entry for the same
+    # key before appending the new value, so each instance has exactly one
+    # final state record even if multiple code paths write during pre_sleep
+    # (e.g., hibernate_vm writes "hibernated" then "was_shutdown" on timeout).
+    local key="$1" value="$2"
+    if [[ -f "$STATE_FILE" ]]; then
+        sed -i "/^${key}=/d" "$STATE_FILE"
+    fi
+    echo "${key}=${value}" >> "$STATE_FILE"
+}
+
+# --- Hibernate / shutdown / resume per instance -----------------------------
+
+# Hibernate a single Windows VM. State key values used across all sleep paths:
+#   hibernated | shutdown | was_shutdown | not_running | kept_running | ignored
+hibernate_vm() {
+    local id="$1"
+    local name; name=$(get_cfg "VM_${id}_NAME" "vm-${id}")
+    log "Initiating Windows hibernation for VM $id ($name)..."
+
+    if ! vm_is_running "$id"; then
+        log "VM $id not running, nothing to hibernate"
+        state_set_stopped "vm_${id}"
         return 0
     fi
 
-    if ! guest_agent_ready; then
-        log "WARNING: Guest agent not responsive, attempting shutdown instead"
-        qm shutdown "$VMID" --timeout 120
-        echo "was_shutdown" > "$STATE_FILE"
-        return $?
+    if ! guest_agent_ready "$id"; then
+        log "WARNING: Guest agent not responsive for VM $id, attempting shutdown instead"
+        if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+            log "VM $id shut down cleanly via fallback"
+            state_set "vm_${id}" "shutdown"
+            return 0
+        fi
+        log "WARNING: Graceful shutdown failed for VM $id, forcing stop"
+        qm stop "$id" &>/dev/null || true
+        state_set "vm_${id}" "was_shutdown"
+        return 1
     fi
 
-    # Record that VM was running and we're hibernating it
-    echo "hibernated" > "$STATE_FILE"
+    state_set "vm_${id}" "hibernated"
 
-    # Send hibernate command to Windows
-    # Using shutdown /h which triggers hibernation
-    log "Sending hibernate command to Windows..."
-    if ! qm guest exec "$VMID" -- cmd /c "shutdown /h" &>/dev/null; then
-        log "WARNING: Hibernate command may have failed (exit code: $?)"
+    log "Sending hibernate command to VM $id..."
+    if ! qm guest exec "$id" -- cmd /c "shutdown /h" &>/dev/null; then
+        log "WARNING: Hibernate command may have failed for VM $id"
     fi
 
-    # Wait for VM to actually stop (hibernation completes)
-    # We need to confirm it stays stopped to avoid race conditions
-    local waited=0
-    local consecutive_stopped=0
-    local required_stopped=3  # Require 3 consecutive "stopped" checks (15 seconds)
-
+    local waited=0 consecutive_stopped=0
+    local required_stopped=3
     while [[ $waited -lt $HIBERNATE_TIMEOUT ]]; do
         sleep 5
         waited=$((waited + 5))
 
         local current_status
-        current_status=$(qm status "$VMID" 2>/dev/null | awk '{print $2}')
-        log "VM status after ${waited}s: $current_status"
+        current_status=$(qm status "$id" 2>/dev/null | awk '{print $2}')
+        log "VM $id status after ${waited}s: $current_status"
 
         if [[ "$current_status" != "running" ]]; then
             consecutive_stopped=$((consecutive_stopped + 1))
-            log "VM not running (check $consecutive_stopped of $required_stopped)"
-
+            log "VM $id not running (check $consecutive_stopped of $required_stopped)"
             if [[ $consecutive_stopped -ge $required_stopped ]]; then
-                # Double-check QEMU process is gone
-                if ! pgrep -f "qemu.*-id $VMID " > /dev/null 2>&1; then
-                    log "VM hibernation confirmed complete (took ${waited}s)"
+                # Proxmox execs the guest as `kvm`, not `qemu`, and the only
+                # literal "qemu" on its command line (the qemu-server socket
+                # paths) comes after -id — so a qemu-anchored pattern cannot
+                # match and this guard would silently never fire.
+                if ! pgrep -f "(qemu|kvm).*-id $id " > /dev/null 2>&1; then
+                    log "VM $id hibernation confirmed complete (took ${waited}s)"
                     return 0
                 else
-                    log "QEMU process still exists, continuing to wait..."
+                    log "QEMU process for VM $id still exists, continuing to wait..."
                     consecutive_stopped=0
                 fi
             fi
         else
             consecutive_stopped=0
-            log "Still waiting for hibernation..."
         fi
     done
 
-    log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s"
-    log "Attempting graceful shutdown..."
-    qm shutdown "$VMID" --timeout 60
-    echo "was_shutdown" > "$STATE_FILE"
+    log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s for VM $id; attempting graceful shutdown"
+    if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        log "VM $id shut down cleanly after hibernation timeout"
+        state_set "vm_${id}" "shutdown"
+        # Hibernation failed, but the VM is cleanly stopped and the host can
+        # safely sleep — from the caller's point of view the pre-sleep action
+        # succeeded. Return non-zero only if we couldn't stop the VM cleanly.
+        return 0
+    fi
+    log "ERROR: VM $id shutdown failed after hibernation timeout; forcing stop"
+    qm stop "$id" &>/dev/null || true
+    state_set "vm_${id}" "was_shutdown"
     return 1
 }
 
-# Resume VM after host wake
-resume_vm() {
-    log "Host waking up, checking if VM should be resumed..."
+# Cleanly shut down a VM (sleep_action=shutdown). State values: see hibernate_vm.
+shutdown_vm() {
+    local id="$1"
+    local name; name=$(get_cfg "VM_${id}_NAME" "vm-${id}")
+    log "Shutting down VM $id ($name)..."
 
-    if [[ ! -f "$STATE_FILE" ]]; then
-        log "No state file found, not starting VM"
+    if ! vm_is_running "$id"; then
+        log "VM $id not running, nothing to do"
+        state_set_stopped "vm_${id}"
         return 0
     fi
 
-    local prev_state
-    prev_state=$(cat "$STATE_FILE")
-    rm -f "$STATE_FILE"
+    # `qm shutdown --timeout N` already blocks until the VM stops or N seconds
+    # elapse, so we trust its exit code rather than polling afterwards (which
+    # would double the worst-case wait).
+    if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        log "VM $id shut down cleanly"
+        state_set "vm_${id}" "shutdown"
+        return 0
+    fi
 
-    case "$prev_state" in
-        hibernated|was_shutdown)
-            log "VM was $prev_state before sleep"
+    log "ERROR: VM $id shutdown timeout or failure; forcing stop"
+    qm stop "$id" &>/dev/null || true
+    state_set "vm_${id}" "was_shutdown"
+    return 1
+}
 
-            # Check if VM is already running (shouldn't happen, but handle it)
-            if vm_is_running; then
-                log "WARNING: VM is already running - hibernation may not have completed"
-                log "Waiting to see if VM stops (hibernation completing)..."
+# Shut down an LXC container. State values: see hibernate_vm.
+shutdown_ct() {
+    local id="$1"
+    local name; name=$(get_cfg "CONTAINER_${id}_NAME" "ct-${id}")
+    log "Shutting down container $id ($name)..."
 
-                # Wait up to 60 seconds for hibernation to complete
-                local wait_count=0
-                while vm_is_running && [[ $wait_count -lt 12 ]]; do
-                    sleep 5
-                    wait_count=$((wait_count + 1))
-                    local elapsed_seconds=$((wait_count * 5))
-                    log "VM still running, waiting... (${elapsed_seconds}s)"
-                done
+    if ! ct_is_running "$id"; then
+        log "Container $id not running, nothing to do"
+        state_set_stopped "ct_${id}"
+        return 0
+    fi
 
-                if vm_is_running; then
-                    log "VM remained running - assuming it's operational"
-                    return 0
-                else
-                    log "VM stopped (hibernation completed late), now starting..."
-                fi
-            fi
+    # `pct shutdown --timeout N` already blocks until the container stops or
+    # N seconds elapse, so we trust its exit code rather than polling
+    # afterwards (which would double the worst-case wait).
+    if pct shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        log "Container $id shut down cleanly"
+        state_set "ct_${id}" "shutdown"
+        return 0
+    fi
 
-            sleep "$WAKE_DELAY"  # Give system time to stabilize
-            qm start "$VMID"
-            local start_status=$?
+    log "ERROR: Container $id shutdown timeout or failure; forcing stop"
+    pct stop "$id" &>/dev/null || true
+    state_set "ct_${id}" "was_shutdown"
+    return 1
+}
 
-            if [[ $start_status -eq 0 ]]; then
-                log "VM start command issued successfully"
-                # VM will resume from hibernation automatically
-            else
-                log "ERROR: Failed to start VM (may already be running)"
-                # Check if it's running anyway
-                if vm_is_running; then
-                    log "VM is running, continuing normally"
-                    return 0
-                fi
-                return 1
-            fi
-            ;;
-        not_running)
-            log "VM was not running before sleep, leaving it stopped"
-            ;;
-        *)
-            log "Unknown previous state: $prev_state"
-            ;;
+# Start a stopped instance (called from post_wake for resumable states)
+resume_instance() {
+    local kind="$1" id="$2"
+    local label name
+    case "$kind" in
+        vm) label="VM"        ; name=$(get_cfg "VM_${id}_NAME"        "vm-${id}") ;;
+        ct) label="Container" ; name=$(get_cfg "CONTAINER_${id}_NAME" "ct-${id}") ;;
     esac
 
-    return 0
+    log "Resuming $label $id ($name)..."
+
+    # Race handling: if the instance is already running (e.g., VM finishing late
+    # hibernation), wait briefly for it to stop, then start it.
+    if instance_is_running "$kind" "$id"; then
+        log "WARNING: $label $id is already running — hibernation may not have completed"
+        local wait_count=0
+        while instance_is_running "$kind" "$id" && [[ $wait_count -lt 12 ]]; do
+            sleep 5
+            wait_count=$((wait_count + 1))
+            log "$label $id still running, waiting... ($((wait_count * 5))s)"
+        done
+        if instance_is_running "$kind" "$id"; then
+            log "$label $id remained running — assuming it's operational"
+            return 0
+        else
+            log "$label $id stopped (hibernation completed late), now starting..."
+        fi
+    fi
+
+    sleep "$WAKE_DELAY"
+    local rc
+    case "$kind" in
+        vm) qm start "$id"  ; rc=$? ;;
+        ct) pct start "$id" ; rc=$? ;;
+    esac
+    if [[ $rc -eq 0 ]]; then
+        log "$label $id start command issued successfully"
+        return 0
+    fi
+    log "ERROR: Failed to start $label $id (exit $rc)"
+    if instance_is_running "$kind" "$id"; then
+        log "$label $id is running anyway, continuing"
+        return 0
+    fi
+    return 1
 }
 
-# Pre-sleep hook (called before system sleeps)
+# --- Hook entry points ------------------------------------------------------
+
 pre_sleep() {
     log "=== PRE-SLEEP HOOK TRIGGERED ==="
-    hibernate_vm
-    local result=$?
-    log "=== PRE-SLEEP HOOK COMPLETE (exit: $result) ==="
-    return $result
+
+    # Read what the last cycle left behind before truncating: an instance we
+    # stopped and failed to resume is still stopped now, and must not be
+    # rewritten as not_running.
+    load_pending_state
+
+    # Truncate state file — one fresh record per sleep cycle
+    : > "$STATE_FILE"
+
+    local overall_rc=0 id action
+
+    for id in $VM_IDS; do
+        action=$(get_cfg "VM_${id}_SLEEP_ACTION" "hibernate")
+        case "$action" in
+            hibernate)
+                hibernate_vm "$id" || overall_rc=$?
+                ;;
+            shutdown)
+                shutdown_vm "$id" || overall_rc=$?
+                ;;
+            keep_running)
+                log "VM $id: sleep_action=keep_running"
+                state_set_untouched vm "$id" "kept_running"
+                ;;
+            ignore)
+                log "VM $id: sleep_action=ignore"
+                state_set_untouched vm "$id" "ignored"
+                ;;
+            *)
+                # Fall back to the documented default, not to "ignore": this
+                # process re-reads the config on every invocation and never
+                # validates it, so a typo must not leave the VM running while
+                # the host suspends.
+                log "WARN: unknown VM_${id}_SLEEP_ACTION='$action' — falling back to hibernate"
+                hibernate_vm "$id" || overall_rc=$?
+                ;;
+        esac
+    done
+
+    for id in $CONTAINER_IDS; do
+        action=$(get_cfg "CONTAINER_${id}_SLEEP_ACTION" "shutdown")
+        case "$action" in
+            shutdown)
+                shutdown_ct "$id" || overall_rc=$?
+                ;;
+            hibernate)
+                log "WARN: hibernate not supported for LXC $id; shutting down instead"
+                shutdown_ct "$id" || overall_rc=$?
+                ;;
+            keep_running)
+                log "Container $id: sleep_action=keep_running"
+                state_set_untouched ct "$id" "kept_running"
+                ;;
+            ignore)
+                log "Container $id: sleep_action=ignore"
+                state_set_untouched ct "$id" "ignored"
+                ;;
+            *)
+                log "WARN: unknown CONTAINER_${id}_SLEEP_ACTION='$action' — falling back to shutdown"
+                shutdown_ct "$id" || overall_rc=$?
+                ;;
+        esac
+    done
+
+    # An instance dropped from VM_IDS/CONTAINER_IDS while still awaiting resume
+    # is visited by neither loop, so nothing carried its record forward. We
+    # stopped it, so keep the note until something starts it again.
+    local pending_key
+    for pending_key in "${!PENDING_STATE[@]}"; do
+        if ! grep -q "^${pending_key}=" "$STATE_FILE" 2>/dev/null; then
+            log "$pending_key is no longer configured but still awaiting resume; keeping its record"
+            state_set "$pending_key" "${PENDING_STATE[$pending_key]}"
+        fi
+    done
+
+    log "=== PRE-SLEEP HOOK COMPLETE (exit: $overall_rc) ==="
+    # Default: return 0 so a failed instance doesn't abort systemd's sleep
+    # transition (matches prior behavior). Manual callers can set
+    # PRE_SLEEP_NONBLOCKING=0 to receive the aggregated result.
+    if [[ "${PRE_SLEEP_NONBLOCKING:-1}" == "1" ]]; then
+        return 0
+    fi
+    return "$overall_rc"
 }
 
-# Post-wake hook (called after system wakes)
 post_wake() {
     log "=== POST-WAKE HOOK TRIGGERED ==="
 
-    # CRITICAL: Reset idle monitor state FIRST to prevent immediate re-sleep
-    # The idle monitor may have stale state from before sleep that would
-    # cause it to immediately trigger another sleep cycle
-    local idle_state_file="/tmp/proxmox-idle-monitor.state"
-    local idle_wake_file="/tmp/proxmox-idle-monitor.wake"
-
+    # CRITICAL: clear idle monitor state and record wake time before resuming
+    # anything, so the idle monitor doesn't immediately re-trigger sleep.
+    local idle_state_file="$STATE_DIR/idle-monitor.state"
+    local idle_wake_file="$STATE_DIR/idle-monitor.wake"
     if [[ -f "$idle_state_file" ]]; then
         log "Clearing stale idle monitor state"
         rm -f "$idle_state_file"
     fi
-
-    # Record wake time for idle monitor's grace period
     date +%s > "$idle_wake_file"
     log "Wake time recorded for idle monitor"
 
-    resume_vm
-    local result=$?
-    log "=== POST-WAKE HOOK COMPLETE (exit: $result) ==="
-    return $result
+    if [[ ! -f "$STATE_FILE" ]]; then
+        log "No state file found — nothing to resume"
+        log "=== POST-WAKE HOOK COMPLETE (exit: 0) ==="
+        return 0
+    fi
+
+    local overall_rc=0 line key value kind id resume_flag
+    local unresumed=()
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+
+        case "$key" in
+            vm_*)
+                kind=vm
+                id="${key#vm_}"
+                resume_flag=$(get_cfg "VM_${id}_RESUME_ON_WAKE" "1")
+                ;;
+            ct_*)
+                kind=ct
+                id="${key#ct_}"
+                resume_flag=$(get_cfg "CONTAINER_${id}_RESUME_ON_WAKE" "1")
+                ;;
+            *)
+                log "WARN: unknown state key '$key', skipping"
+                continue
+                ;;
+        esac
+
+        case "$value" in
+            hibernated|shutdown|was_shutdown)
+                # Off only when explicitly 0, so a typo resumes the instance
+                # rather than leaving the user's session stopped.
+                if [[ "$resume_flag" != "0" ]]; then
+                    # Not $? — inside `if !` that is the status of the negation,
+                    # which is always 0.
+                    if ! resume_instance "$kind" "$id"; then
+                        overall_rc=1
+                        unresumed+=("$line")
+                    fi
+                else
+                    log "$kind $id: RESUME_ON_WAKE=$resume_flag, leaving stopped"
+                fi
+                ;;
+            not_running)
+                log "$kind $id was not running before sleep, leaving stopped"
+                ;;
+            kept_running|ignored)
+                log "$kind $id was $value, no action"
+                ;;
+            *)
+                log "WARN: unknown state value '$value' for $key"
+                ;;
+        esac
+    done < "$STATE_FILE"
+
+    # An instance that failed to come back keeps its entry: the state file is
+    # the only record of what still needs starting, and `resume` re-reads it.
+    # Entries that resumed are dropped so a retry does not restart them.
+    if [[ ${#unresumed[@]} -eq 0 ]]; then
+        rm -f "$STATE_FILE"
+    else
+        printf '%s\n' "${unresumed[@]}" > "$STATE_FILE"
+        log "${#unresumed[@]} instance(s) did not resume; run 'resume' to retry once the cause is fixed"
+    fi
+
+    log "=== POST-WAKE HOOK COMPLETE (exit: $overall_rc) ==="
+    return $overall_rc
 }
 
-# Show status
+# --- Manual/status commands -------------------------------------------------
+
+# Hibernate (or shut down per config) every configured instance without sleeping the host.
+# Uses PRE_SLEEP_NONBLOCKING=0 so the caller receives the aggregated exit code.
+hibernate_all() {
+    PRE_SLEEP_NONBLOCKING=0 pre_sleep
+}
+
+# Resume every instance per current state file
+resume_all() {
+    post_wake
+}
+
+# post_wake resumes unless the value is exactly 0, so printing the raw string
+# would read as the opposite of what happens for anything else.
+describe_resume() {
+    case "$1" in
+        0) printf 'no\n' ;;
+        1) printf 'yes\n' ;;
+        *) printf 'yes (%s is not 0 or 1)\n' "$1" ;;
+    esac
+}
+
+# Print the configured action alongside what pre_sleep will actually do, which
+# differs by kind: LXC cannot hibernate, and an unrecognised value falls back to
+# the kind's default rather than being left alone.
+describe_action() {
+    local action="$1" kind="$2"
+    case "$kind:$action" in
+        ct:hibernate)
+            printf 'hibernate (not supported for LXC — will shut down instead)\n' ;;
+        *:hibernate|*:shutdown|*:keep_running|*:ignore)
+            printf '%s\n' "$action" ;;
+        ct:*)
+            printf '%s (INVALID — will fall back to shutdown)\n' "$action" ;;
+        *)
+            printf '%s (INVALID — will fall back to hibernate)\n' "$action" ;;
+    esac
+}
+
 status() {
     echo "Proxmox Sleep Manager Status"
     echo "============================="
-    echo "VM ID: $VMID"
-    echo "VM Name: $VM_NAME"
+    echo "VM IDs: ${VM_IDS:-<none>}"
+    echo "Container IDs: ${CONTAINER_IDS:-<none>}"
     echo ""
 
-    if vm_is_running; then
-        echo "VM Status: RUNNING"
-        if guest_agent_ready; then
-            echo "Guest Agent: RESPONSIVE"
+    local id name action resume
+    for id in $VM_IDS; do
+        name=$(get_cfg "VM_${id}_NAME" "vm-${id}")
+        action=$(get_cfg "VM_${id}_SLEEP_ACTION" "hibernate")
+        resume=$(get_cfg "VM_${id}_RESUME_ON_WAKE" "1")
+        echo "VM $id ($name):"
+        if vm_is_running "$id"; then
+            echo "  Status:        RUNNING"
+            if guest_agent_ready "$id"; then
+                echo "  Guest agent:   RESPONSIVE"
+            else
+                echo "  Guest agent:   NOT RESPONDING"
+            fi
         else
-            echo "Guest Agent: NOT RESPONDING"
+            echo "  Status:        STOPPED"
         fi
-    else
-        echo "VM Status: STOPPED"
-    fi
+        echo "  Sleep action:  $(describe_action "$action" vm)"
+        echo "  Resume on wake: $(describe_resume "$resume")"
+        echo ""
+    done
 
-    echo ""
+    for id in $CONTAINER_IDS; do
+        name=$(get_cfg "CONTAINER_${id}_NAME" "ct-${id}")
+        action=$(get_cfg "CONTAINER_${id}_SLEEP_ACTION" "shutdown")
+        resume=$(get_cfg "CONTAINER_${id}_RESUME_ON_WAKE" "1")
+        echo "Container $id ($name):"
+        if ct_is_running "$id"; then
+            echo "  Status:        RUNNING"
+        else
+            echo "  Status:        STOPPED"
+        fi
+        echo "  Sleep action:  $(describe_action "$action" ct)"
+        echo "  Resume on wake: $(describe_resume "$resume")"
+        echo ""
+    done
+
+    # Not necessarily from the last pre-sleep: post_wake keeps the entry for an
+    # instance it could not restart, and that is the record `resume` acts on.
     if [[ -f "$STATE_FILE" ]]; then
-        echo "Pending State: $(cat "$STATE_FILE")"
+        echo "Recorded instance state:"
+        sed 's/^/  /' "$STATE_FILE"
+        echo "  (run 'proxmox-sleep-manager.sh resume' if an instance is still stopped)"
     else
-        echo "Pending State: none"
+        echo "Recorded instance state: none"
     fi
 
     echo ""
@@ -267,34 +664,24 @@ status() {
 
 # Main
 case "${1:-}" in
-    pre-sleep)
-        pre_sleep
-        ;;
-    post-wake)
-        post_wake
-        ;;
-    hibernate)
-        hibernate_vm
-        ;;
-    resume)
-        resume_vm
-        ;;
-    status)
-        status
-        ;;
+    pre-sleep)  pre_sleep ;;
+    post-wake)  post_wake ;;
+    hibernate)  hibernate_all ;;
+    resume)     resume_all ;;
+    status)     status ;;
     *)
         echo "Usage: $0 {pre-sleep|post-wake|hibernate|resume|status}"
         echo ""
         echo "Commands:"
-        echo "  pre-sleep  - Hibernate VM before system sleep"
-        echo "  post-wake  - Resume VM after system wake"
-        echo "  hibernate  - Manually hibernate the VM"
-        echo "  resume     - Manually resume/start the VM"
-        echo "  status     - Show current status"
+        echo "  pre-sleep  - Act on all configured VMs/containers before system sleep"
+        echo "  post-wake  - Resume instances that were stopped by pre-sleep"
+        echo "  hibernate  - Manually trigger pre-sleep actions (does NOT sleep the host)"
+        echo "  resume     - Manually trigger post-wake actions"
+        echo "  status     - Show current status of all configured instances"
         echo ""
         echo "Configuration:"
         echo "  Config file: /etc/proxmox-sleep.conf"
-        echo "  See proxmox-sleep.conf.example for all options"
+        echo "  See proxmox-sleep.conf.example for the multi-instance format."
         exit 1
         ;;
 esac

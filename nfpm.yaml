@@ -8,8 +8,10 @@ version: "${VERSION}"
 maintainer: stuckj <stuckj@users.noreply.github.com>
 description: |
   Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.
-  Hibernates Windows VM before host sleep and resumes it after wake.
-  Includes idle monitoring to auto-sleep when system is inactive.
+  Hibernates Windows VMs and shuts down LXC containers before host sleep, then
+  resumes them after wake. Any number of VMs and containers can be managed, each
+  with its own sleep action. Includes idle monitoring to auto-sleep when the
+  system is inactive.
 vendor: stuckj
 homepage: https://github.com/stuckj/proxmox-sleep
 license: MIT

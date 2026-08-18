@@ -1,0 +1,6 @@
+#!/bin/bash
+# Mock `systemd-inhibit --list --no-legend`; prints $MOCK_INHIBITORS (default none).
+set -uo pipefail
+printf '%s' "${MOCK_INHIBITORS:-}"
+[[ -n "${MOCK_INHIBITORS:-}" ]] && printf '\n'
+exit 0

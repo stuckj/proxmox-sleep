@@ -285,7 +285,7 @@ The code is correct as-is because [reason].
 
 ### Shell Script Style
 
-- **Shebang**: `#!/usr/bin/env bash`
+- **Shebang**: `#!/bin/bash`
 - **Shellcheck**: All scripts should pass shellcheck
 - **Quoting**: Always quote variables: `"$variable"`
 - **Functions**: Use lowercase with underscores: `my_function()`
@@ -295,12 +295,14 @@ The code is correct as-is because [reason].
 ### Error Handling
 
 ```bash
-# Use set -e for early exit on errors
-set -euo pipefail
+# proxmox-idle-monitor.sh omits -e: a failing `qm status` or `pct exec` must not
+# kill a monitor that has to survive for weeks. install.sh/uninstall.sh use -e.
+# proxmox-sleep-manager.sh currently sets no options at all.
+set -uo pipefail
 
 # Use explicit error handling for expected failures
 if ! some_command; then
-    log "ERROR" "some_command failed"
+    log "some_command failed"
     return 1
 fi
 
@@ -311,20 +313,42 @@ trap cleanup EXIT
 ### Logging
 
 ```bash
-# Always use the log function
-log "INFO" "Starting operation"
-log "DEBUG" "Variable value: $var"  # Only shown if DEBUG=1
-log "ERROR" "Operation failed"
+# log() takes a single argument — there is no level parameter.
+log "Starting operation"
+log "Operation failed"
+
+# debug() is the DEBUG=1-only channel, and writes to the log file directly.
+debug "Variable value: $var"
+
+# CLI subcommands (status, check) print their result to stdout with echo.
+echo "Idle Tracking: Paused (system is active)"
 ```
 
 ---
 
 ## Testing
 
+### Offline test suite
+
+`tests/run-tests.sh` runs both scripts end-to-end through their real CLI
+subcommands with `qm`/`pct`/`pvesh`/`nvidia-smi`/`systemctl`/`pgrep` replaced by
+mocks. It needs no Proxmox host, no root and no network, and CI runs the same
+script on every push and pull request — so run it before pushing.
+
+```bash
+tests/run-tests.sh            # everything
+tests/run-tests.sh gaming     # only tests whose name contains "gaming"
+VERBOSE=1 tests/run-tests.sh  # dump script output for each test
+```
+
+When adding a check or a config setting, add a test for it. See
+[tests/README.md](../tests/README.md) for what the suite covers.
+
 ### Manual Testing Checklist
 
 Before submitting a PR, verify:
 
+- [ ] Offline suite passes: `tests/run-tests.sh`
 - [ ] Scripts pass shellcheck: `shellcheck *.sh`
 - [ ] Install script works on fresh system
 - [ ] Sleep manager handles missing VM gracefully
@@ -349,8 +373,9 @@ shellcheck -x *.sh
 # Test status display
 ./proxmox-idle-monitor.sh status
 
-# Simulate sleep (without actually sleeping)
-DEBUG=1 ./proxmox-sleep-manager.sh pre-sleep
+# Simulate sleep (without actually sleeping). The sleep manager has no DEBUG
+# channel — it logs every step unconditionally to /var/log/proxmox-sleep-manager.log.
+./proxmox-sleep-manager.sh pre-sleep
 ```
 
 ---

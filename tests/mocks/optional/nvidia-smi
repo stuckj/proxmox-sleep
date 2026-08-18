@@ -1,0 +1,18 @@
+#!/bin/bash
+#
+# Mock host-side `nvidia-smi`, kept in mocks/optional/ so tests can control
+# whether the binary exists at all: the directory is only added to PATH when a
+# test wants `command -v nvidia-smi` to succeed. That models a Proxmox host
+# whose GPU is bound to vfio-pci (driver present, or absent entirely).
+#
+#   MOCK_NVIDIA_OUTPUT - lines printed for --query-gpu (one per GPU)
+#   MOCK_NVIDIA_RC     - exit code; non-zero models "no devices found"
+
+set -uo pipefail
+
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'nvidia-smi %s\n' "$*" >> "$MOCK_CALL_LOG"
+
+rc="${MOCK_NVIDIA_RC:-0}"
+[[ "$rc" != "0" ]] && exit "$rc"
+
+printf '%s\n' "${MOCK_NVIDIA_OUTPUT:-0}"

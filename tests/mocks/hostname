@@ -1,0 +1,4 @@
+#!/bin/bash
+# Mock `hostname`; get_proxmox_node() falls back to this when /etc/pve is absent.
+set -uo pipefail
+printf '%s\n' "${MOCK_HOSTNAME:-testnode}"

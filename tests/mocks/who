@@ -1,0 +1,5 @@
+#!/bin/bash
+# Mock `who`; prints $MOCK_WHO (default: no logged-in sessions).
+set -uo pipefail
+[[ -n "${MOCK_WHO:-}" ]] && printf '%s\n' "$MOCK_WHO"
+exit 0
