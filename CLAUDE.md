@@ -356,6 +356,14 @@ fails when it stops being true, plus the dated PR or issue.
 - **The bot account cannot resolve review threads or write PR metadata.** It has push but not
   admin; those calls fail as 404 rather than 403. Replying to a review comment works; marking
   the thread resolved does not.
+- **`gh pr edit` fails against this repo and discards the edit.** It hits the deprecated
+  projects-classic GraphQL field (`repository.pullRequest.projectCards`), prints only the
+  deprecation notice, and **exits 0** — so the edit looks like it worked and did not. Use
+  REST instead: `gh api -X PATCH repos/stuckj/proxmox-sleep/pulls/<n> --input body.json`.
+  `gh pr view --json <fields>`, `gh pr create`, `gh pr list` and `gh issue *` are fine.
+- **The bot cannot add issues to the Open Source Maintenance project.** `gh project item-add`
+  prints nothing and exits 0, but the item never appears — verify with `item-list`, or hand
+  the command to the repo owner.
 - **Run the offline suite before pushing** — `tests/run-tests.sh`. It needs no Proxmox host,
   no root, and no network, so there is no excuse for pushing an unrun change. CI runs the
   same script on push and pull request.
