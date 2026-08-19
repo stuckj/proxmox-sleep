@@ -1780,6 +1780,189 @@ test_missing_config_file_is_a_config_error() {
     assert_contains "points at the example" "$out" "Configuration file not found"
 }
 
+# ── Packaging ─────────────────────────────────────────────────────────────────
+# The release pipeline signs each rpm and derives the apt/yum indexes from the
+# release assets. Both are checked here rather than only on a tag push, where a
+# mistake is published before anyone sees it.
+
+fixture() { python3 "$REPO_ROOT/tests/rpm-fixture.py" "$@"; }
+sigcheck() { python3 "$REPO_ROOT/scripts/check-rpm-signature.py" "$@" 2>&1; }
+xmlbase() { python3 "$REPO_ROOT/scripts/yum_xmlbase.py" "$@" 2>&1; }
+
+# A repodata directory holding one primary.xml.gz that locates one package.
+# <checksum> and <size> are deliberately wrong so the test can tell whether
+# yum_xmlbase.py recomputed them or passed them through.
+make_repodata() { # dir rpm-name [primary-type]
+    local dir="$1" rpm="$2" type="${3:-primary}"
+    mkdir -p "$dir"
+    python3 - "$dir" "$rpm" "$type" <<'PY'
+import gzip, sys
+d, rpm, typ = sys.argv[1], sys.argv[2], sys.argv[3]
+primary = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<metadata xmlns="http://linux.duke.edu/metadata/common" packages="1">\n'
+    '<package type="rpm"><name>proxmox-sleep</name>\n'
+    f'<location href="{rpm}"/>\n'
+    '<time file="1750000000" build="1750000000"/>\n'
+    '</package>\n</metadata>\n')
+open(f"{d}/aaa-primary.xml.gz", "wb").write(gzip.compress(primary.encode()))
+open(f"{d}/repomd.xml", "w").write(
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<repomd xmlns="http://linux.duke.edu/metadata/repo">\n'
+    '  <revision>1</revision>\n'
+    f'  <data type="{typ}">\n'
+    '    <checksum type="sha1">stale</checksum>\n'
+    '    <open-checksum type="sha1">stale</open-checksum>\n'
+    '    <location href="repodata/aaa-primary.xml.gz"/>\n'
+    '    <size>1</size>\n    <open-size>1</open-size>\n'
+    '  </data>\n</repomd>\n')
+PY
+}
+
+test_rpm_signature_unsigned_is_a_failure() {
+    # Carries the digests every rpm has and no signature. Reading either digest
+    # tag as a signature is the mistake this guards against.
+    fixture "$SANDBOX/pkg.rpm" --digests
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "unsigned rpm fails" "$rc" 1
+    assert_contains "names it unsigned" "$out" "UNSIGNED"
+}
+
+test_rpm_signature_eddsa_lands_in_tag_267() {
+    # An ed25519 signing key -- which this project uses -- produces a signature
+    # in DSAHEADER, not RSAHEADER.
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --digests
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "signed rpm passes" "$rc" 0
+    assert_contains "reads the EdDSA header signature" "$out" "DSAHEADER=EdDSA"
+}
+
+test_rpm_signature_rsa_tag_268_also_counts() {
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 268
+    local rc
+    sigcheck "$SANDBOX/pkg.rpm" >/dev/null; rc=$?
+    assert_rc "RSAHEADER counts as signed" "$rc" 0
+}
+
+test_rpm_signature_requires_the_named_key() {
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --issuer aaaabbbbccccdddd
+    local out rc
+    out=$(sigcheck --key deadbeefdeadbeef "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "a signature by another key fails" "$rc" 1
+    assert_contains "says which key it wanted" "$out" "WRONG KEY"
+
+    out=$(sigcheck --key aaaabbbbccccdddd "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "the right key passes" "$rc" 0
+}
+
+test_rpm_signature_tag_alone_is_not_proof() {
+    # The signature tag is present and holds a well-formed OpenPGP packet that
+    # is not a signature. Treating the tag's presence as proof would pass this.
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --not-a-sig --digests
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "a non-signature packet does not count" "$rc" 1
+    assert_contains "names it unsigned" "$out" "UNSIGNED"
+}
+
+test_rpm_signature_truncated_file_is_a_failure() {
+    fixture "$SANDBOX/pkg.rpm" --truncate
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "a truncated rpm fails" "$rc" 1
+    assert_contains "does not call it signed" "$out" "UNREADABLE"
+}
+
+test_yum_xmlbase_points_packages_at_releases() {
+    local rpm="proxmox-sleep-1.1.0-1.noarch.rpm"
+    make_repodata "$SANDBOX/in" "$rpm"
+    printf 'v1.1.0/%s\n' "$rpm" > "$SANDBOX/assetmap"
+    local rc
+    xmlbase "$SANDBOX/in" "$SANDBOX/out" "$SANDBOX/assetmap" "https://ex.test/dl" >/dev/null
+    rc=$?
+    assert_rc "rewrite succeeds" "$rc" 0
+
+    local primary
+    primary=$(gzip -dc "$SANDBOX"/out/*-primary.xml.gz)
+    assert_contains "package points at its release" "$primary" \
+        'xml:base="https://ex.test/dl/v1.1.0/"'
+    assert_contains "href is the bare asset name" "$primary" "href=\"$rpm\""
+
+    # The digest and size in repomd.xml must describe the file actually written,
+    # or every dnf client rejects the repository. The input seeds them with
+    # "stale" and 1, so anything left unrecomputed is visible.
+    local name sha size repomd
+    name=$(basename "$(echo "$SANDBOX"/out/*-primary.xml.gz)")
+    sha=$(sha256sum "$SANDBOX/out/$name" | awk '{print $1}')
+    size=$(stat -c%s "$SANDBOX/out/$name")
+    repomd=$(cat "$SANDBOX/out/repomd.xml")
+    assert_not_contains "no seeded digest survives" "$repomd" "stale"
+    assert_contains "repomd names the rewritten file" "$repomd" "repodata/$name"
+    # Value and type together: a sha256 digest still labelled sha1 is rejected
+    # by every client, and either half alone would pass on the other's evidence.
+    assert_contains "the digest is recorded as the sha256 it is" "$repomd" \
+        "<checksum type=\"sha256\">$sha</checksum>"
+    assert_contains "repomd carries its real size" "$repomd" "<size>$size</size>"
+    assert_eq "the filename is the digest" "${name%%-primary.xml.gz}" "$sha"
+}
+
+test_yum_xmlbase_refuses_an_unhandled_metadata_type() {
+    # primary_db also carries package locations; copying it through unmodified
+    # would advertise the pre-migration paths to any client that prefers it.
+    make_repodata "$SANDBOX/in" "proxmox-sleep-1.1.0-1.noarch.rpm" primary_db
+    : > "$SANDBOX/assetmap"
+    local out rc
+    out=$(xmlbase "$SANDBOX/in" "$SANDBOX/out" "$SANDBOX/assetmap" "https://ex.test/dl"); rc=$?
+    assert_rc "refuses rather than passing it through" "$rc" 1
+    assert_contains "says why" "$out" "unexpected repodata type"
+}
+
+test_yum_xmlbase_fails_when_no_release_holds_a_package() {
+    make_repodata "$SANDBOX/in" "proxmox-sleep-9.9.9-1.noarch.rpm"
+    printf 'v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm\n' > "$SANDBOX/assetmap"
+    local out rc
+    out=$(xmlbase "$SANDBOX/in" "$SANDBOX/out" "$SANDBOX/assetmap" "https://ex.test/dl"); rc=$?
+    assert_rc "an unlocatable package is fatal" "$rc" 1
+    assert_contains "names the package" "$out" "proxmox-sleep-9.9.9-1.noarch.rpm"
+}
+
+test_rebuild_refuses_a_work_dir_inside_a_checkout() {
+    # The work directory is wiped, so a path inside a checkout would delete
+    # tracked files.
+    local out rc
+    out=$(GPG_KEY_ID=dummy bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" \
+              "$REPO_ROOT/scratch-should-not-exist" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "says why" "$out" "inside a git working tree"
+    if [[ -e "$REPO_ROOT/scratch-should-not-exist" ]]; then
+        fail_assert "the guard ran only after creating the directory"
+        rm -rf "$REPO_ROOT/scratch-should-not-exist"
+    fi
+}
+
+test_rebuild_refuses_a_directory_it_did_not_create() {
+    mkdir -p "$SANDBOX/notmine"
+    : > "$SANDBOX/notmine/precious"
+    local out rc
+    out=$(GPG_KEY_ID=dummy bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" \
+              "$SANDBOX/notmine" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "says why" "$out" "refusing to wipe non-empty"
+    [[ -f "$SANDBOX/notmine/precious" ]] || fail_assert "the directory was wiped anyway"
+}
+
+test_resign_refuses_a_work_dir_with_whitespace() {
+    # The path is interpolated into an rpm macro that rpm re-splits on
+    # whitespace, so a space there breaks signing in a confusing way.
+    local out rc
+    out=$(GPG_KEY_ID=dummy bash "$REPO_ROOT/scripts/resign-release-rpms.sh" \
+              "$SANDBOX/has a space" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "says why" "$out" "contains whitespace"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 echo ""
@@ -1894,6 +2077,19 @@ run_test "config/bad-sleep-action"               test_bad_sleep_action_is_a_conf
 run_test "config/invalid-action-in-status"       test_invalid_sleep_action_flagged_in_status
 run_test "config/threshold-zero-disables"        test_zero_idle_threshold_status_reports_disabled
 run_test "config/missing-file"                   test_missing_config_file_is_a_config_error
+
+run_test "pkg/sig-unsigned-fails"                test_rpm_signature_unsigned_is_a_failure
+run_test "pkg/sig-eddsa-tag-267"                 test_rpm_signature_eddsa_lands_in_tag_267
+run_test "pkg/sig-rsa-tag-268"                   test_rpm_signature_rsa_tag_268_also_counts
+run_test "pkg/sig-requires-named-key"            test_rpm_signature_requires_the_named_key
+run_test "pkg/sig-tag-alone-not-proof"           test_rpm_signature_tag_alone_is_not_proof
+run_test "pkg/sig-truncated-fails"               test_rpm_signature_truncated_file_is_a_failure
+run_test "pkg/xmlbase-points-at-releases"        test_yum_xmlbase_points_packages_at_releases
+run_test "pkg/xmlbase-refuses-unknown-type"      test_yum_xmlbase_refuses_an_unhandled_metadata_type
+run_test "pkg/xmlbase-unlocatable-package"       test_yum_xmlbase_fails_when_no_release_holds_a_package
+run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout
+run_test "pkg/rebuild-refuses-foreign-dir"       test_rebuild_refuses_a_directory_it_did_not_create
+run_test "pkg/resign-refuses-whitespace"         test_resign_refuses_a_work_dir_with_whitespace
 
 echo ""
 echo "-------------------------------------------"

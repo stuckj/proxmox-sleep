@@ -77,6 +77,14 @@ Tests are grouped by prefix; `tests/run-tests.sh <substring>` runs one group.
 - **host/**, **wake/**, **config/** — SSH sessions, blocking processes/units,
   sleep inhibitors, wake-time bookkeeping, and `EX_CONFIG` (78) validation
   failures.
+- **pkg/** — the release pipeline: rpm signature detection, the YUM `xml:base`
+  rewrite, and the destructive-path guards in the repository scripts.
+
+The `pkg/` group uses no mocks. `tests/rpm-fixture.py` writes a synthetic rpm
+whose signature header holds exactly what a given test needs — a signature in a
+named tag, digests without a signature, a non-signature packet, or a truncated
+file — so what each test asserts stays visible in the test rather than in a
+committed binary.
 
 ## Regressions locked in
 
@@ -95,3 +103,8 @@ Several tests exist specifically to keep previously fixed bugs fixed:
 - `wake/corrupt-wake-file-repaired` — a non-numeric wake file used to crash the
   daemon under `set -u`; the repair message must also go to **stderr**, because
   `get_seconds_since_wake`'s stdout is its return value.
+- `pkg/sig-eddsa-tag-267` — an ed25519 signature lands in `DSAHEADER` (267), not
+  `RSAHEADER` (268); a checker that omits 267 calls correctly signed packages
+  unsigned.
+- `pkg/sig-tag-alone-not-proof` — the signature tag being present is not proof;
+  its contents have to parse as a signature packet.
