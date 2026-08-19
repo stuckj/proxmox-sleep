@@ -205,9 +205,12 @@ rebuilt repository.
 
 ### Verifying it worked
 
-Header inspection alone is easy to get wrong — an ed25519 signature lands in
-tag 267 (`DSAHEADER`), not 268 (`RSAHEADER`). `scripts/check-rpm-signature.py`
-reads both, and the release workflow runs it on every build:
+Header inspection alone is easy to get wrong, because which signature-header tag
+an ed25519 signature lands in depends on who signed it: `rpmsign` writes tag 267
+(`DSAHEADER`), while nfpm writes 268 (`RSAHEADER`) and 1002 (`PGP`). A checker
+that looks at only one of them calls correctly signed packages unsigned.
+`scripts/check-rpm-signature.py` reads all four, and the release workflow runs it
+on every build:
 
 ```bash
 scripts/check-rpm-signature.py --key <key> ./*.rpm

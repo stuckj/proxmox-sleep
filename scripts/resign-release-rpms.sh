@@ -156,8 +156,12 @@ if [ "$RESTORE" = 1 ]; then
     set +f
     awk -F'\t' 'NR==FNR{w[$1];next} $1 in w' wanted.txt restore-manifest.tsv > filtered.tsv
     mv filtered.tsv restore-manifest.tsv
-    [ -s restore-manifest.tsv ] \
-      || die "the manifest holds nothing for tag(s): $ONLY_TAGS"
+    cut -f1 restore-manifest.tsv | LC_ALL=C sort -u > matched.txt
+    # Per tag, not just "the result is non-empty": a typo alongside a good tag
+    # would otherwise restore the good one, report success, and leave the
+    # release the operator was actually trying to recover still missing.
+    unmatched=$(LC_ALL=C comm -23 wanted.txt matched.txt | tr '\n' ' ')
+    [ -z "${unmatched// /}" ] || die "the manifest holds nothing for tag(s): $unmatched"
     echo "  limited to: $ONLY_TAGS"
   fi
   bad=0
@@ -250,7 +254,12 @@ echo "  key $KEY, sha256 digests"
 # ---------------------------------------------------------------- enumerate
 
 say "enumerate published rpms"
-enumerate assets.tsv
+# all-assets.tsv is the unfiltered view and stays that way. The backup and the
+# "missing from its release" check below have to ask about every release, not
+# just the ones this run was asked to touch: judged against a narrowed listing,
+# every release ONLY_TAGS excluded looks like a package that has gone missing.
+enumerate all-assets.tsv
+cp all-assets.tsv assets.tsv
 
 if [ -n "$ONLY_TAGS" ]; then
   # Tags are matched exactly, not as patterns. -f keeps the shell from expanding
@@ -287,8 +296,8 @@ while IFS=$'\t' read -r tag name size url; do
   # A short read would otherwise be signed and uploaded over the intact original.
   got=$(stat -c%s "$dst")
   [ "$got" = "$size" ] || die "$tag/$name downloaded as $got bytes, expected $size"
-done < assets.tsv
-echo "  $(wc -l < assets.tsv) file(s) fetched"
+done < all-assets.tsv
+echo "  $(wc -l < all-assets.tsv) file(s) fetched"
 
 say "back up every published rpm"
 # Recorded before anything is signed and long before anything is uploaded. Once
@@ -315,7 +324,7 @@ while IFS=$'\t' read -r tag name size url; do
   cp -- "current/$tag/$name" "$dst"
   printf '%s\t%s\t%s\t%s\n' "$tag" "$name" "$(stat -c%s "$dst")" \
          "$(sha256sum "$dst" | awk '{print $1}')" >> manifest.new
-done < assets.tsv
+done < all-assets.tsv
 
 # Carry forward rows whose asset is no longer on its release. A previous run
 # deleted it and did not put it back, so this copy is the only one left and

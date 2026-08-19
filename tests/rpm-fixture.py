@@ -9,7 +9,8 @@ Usage:
   rpm-fixture.py <out> [--sig-tag N] [--issuer HEX16] [--digests] [--truncate]
 
   --sig-tag N   put an OpenPGP signature packet in signature tag N (267, 268,
-                1002 and 1005 are the tags that hold one)
+                1002 and 1005 are the tags that hold one). Repeatable: nfpm
+                writes the same signature to both 268 and 1002.
   --issuer HEX  16-hex-digit key id to name as the signature's issuer
   --digests     add SHA1HEADER (269) and SHA256HEADER (273), which every rpm
                 carries and neither of which is a signature
@@ -60,13 +61,13 @@ def build(entries):
 
 def main(argv):
     out = argv[0]
-    sig_tag = None
+    sig_tags = []
     issuer = "cdb7b8f88afccbe3"
     digests = truncate = not_a_sig = False
     i = 1
     while i < len(argv):
         if argv[i] == "--sig-tag":
-            sig_tag = int(argv[i + 1]); i += 2
+            sig_tags.append(int(argv[i + 1])); i += 2
         elif argv[i] == "--issuer":
             issuer = argv[i + 1]; i += 2
         elif argv[i] == "--digests":
@@ -82,9 +83,9 @@ def main(argv):
     if digests:
         entries.append((269, 6, b"0" * 40 + b"\0"))   # SHA1HEADER
         entries.append((273, 6, b"0" * 64 + b"\0"))   # SHA256HEADER
-    if sig_tag is not None:
+    for tag in sig_tags:
         payload = other_packet() if not_a_sig else signature_packet(issuer)
-        entries.append((sig_tag, 7, payload))
+        entries.append((tag, 7, payload))
     entries.append((1000, 4, struct.pack(">I", 4096)))  # SIZE
 
     blob = LEAD + build(entries)

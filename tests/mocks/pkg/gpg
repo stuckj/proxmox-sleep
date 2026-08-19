@@ -16,7 +16,10 @@ while [[ $# -gt 0 ]]; do
         --detach-sign) mode=detach; shift ;;
         --clearsign)   mode=clear; shift ;;
         --export)      mode=exportkey; shift ;;
-        --passphrase-fd) shift 2 ;;
+        # Options that take a value, so the value is not left behind as a
+        # positional: the clearsign branch reads the file to sign from args[0].
+        --passphrase-fd|--pinentry-mode|--passphrase|--passphrase-file|--homedir|--keyid-format)
+            shift 2 ;;
         -*) shift ;;
         *)  args+=("$1"); shift ;;
     esac

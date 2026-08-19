@@ -1846,6 +1846,19 @@ test_rpm_signature_rsa_tag_268_also_counts() {
     assert_rc "RSAHEADER counts as signed" "$rc" 0
 }
 
+test_rpm_signature_reads_the_nfpm_shape() {
+    # What the release workflow actually produces: nfpm signs with the same
+    # ed25519 key into RSAHEADER *and* PGP, not into DSAHEADER. Reading only the
+    # tag rpmsign uses would call every package the pipeline builds unsigned.
+    local key=aaaabbbbccccdddd
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 268 --sig-tag 1002 --issuer "$key" --digests
+    local out rc
+    out=$(sigcheck --key "$key" "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "the build path's shape reads as signed" "$rc" 0
+    assert_contains "the header signature is read" "$out" "RSAHEADER=EdDSA"
+    assert_contains "the header+payload signature is read" "$out" "PGP=EdDSA"
+}
+
 test_rpm_signature_requires_the_named_key() {
     fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --issuer aaaabbbbccccdddd
     local out rc
@@ -2015,6 +2028,50 @@ test_resign_backup_survives_a_resumed_run() {
     fi
 }
 
+test_resign_narrowed_run_does_not_cry_missing() {
+    # ONLY_TAGS narrows the work list, not the world. Judging "backed up but not
+    # enumerated" against the narrowed listing makes every excluded release look
+    # like a package a failed upload deleted — and the recovery that would be
+    # printed for it replaces a correctly signed asset with the unsigned original.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm two=proxmox-sleep-1.1.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$MOCK_ASSET_DIR/v1.1.0"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    fixture "$MOCK_ASSET_DIR/v1.1.0/$two" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the full run succeeds" "$rc" 0
+
+    out=$(GPG_KEY_ID="$key" ONLY_TAGS=v1.1.0 \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the narrowed re-run succeeds" "$rc" 0
+    assert_not_contains "the excluded release is not called missing" \
+        "$out" "MISSING FROM THEIR RELEASE"
+    assert_not_contains "and no restore of it is suggested" "$out" "ONLY_TAGS='v1.0.0'"
+    assert_eq "the manifest still covers both" "$(wc -l < "$W/backup/manifest.tsv")" "2"
+}
+
+test_resign_restore_rejects_a_tag_it_cannot_serve() {
+    # A typo alongside a good tag would otherwise restore the good one, report
+    # success, and leave the release the operator was recovering still missing.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+    GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" >/dev/null 2>&1
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" RESTORE=1 ONLY_TAGS="v1.0.0 v9.9.9" \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "an unserviceable tag is fatal" "$rc" 1
+    assert_contains "and it names the tag" "$out" "v9.9.9"
+}
+
 test_resign_skips_what_is_already_published_signed() {
     # After a part-finished run, a release already replaced serves signed bytes
     # while the backup still holds the unsigned original. The skip test has to
@@ -2072,6 +2129,9 @@ test_rebuild_apt_shrink_is_compared_by_name() {
           PAGES_URL=https://fake-pages ALLOW_SHRINK=1 \
           bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1)
     assert_not_contains "ALLOW_SHRINK=1 suppresses the refusal" "$out" "apt-history has lost"
+    # Positive marker from past the guard: absence alone would also hold if the
+    # run had died before reaching it.
+    assert_contains "and the run carried on past the guard" "$out" "stable: pinned at"
 }
 
 test_rebuild_refuses_a_work_dir_inside_a_checkout() {
@@ -2227,6 +2287,7 @@ run_test "config/missing-file"                   test_missing_config_file_is_a_c
 run_test "pkg/sig-unsigned-fails"                test_rpm_signature_unsigned_is_a_failure
 run_test "pkg/sig-eddsa-tag-267"                 test_rpm_signature_eddsa_lands_in_tag_267
 run_test "pkg/sig-rsa-tag-268"                   test_rpm_signature_rsa_tag_268_also_counts
+run_test "pkg/sig-nfpm-shape"                    test_rpm_signature_reads_the_nfpm_shape
 run_test "pkg/sig-requires-named-key"            test_rpm_signature_requires_the_named_key
 run_test "pkg/sig-tag-alone-not-proof"           test_rpm_signature_tag_alone_is_not_proof
 run_test "pkg/sig-truncated-fails"               test_rpm_signature_truncated_file_is_a_failure
@@ -2234,6 +2295,8 @@ run_test "pkg/xmlbase-points-at-releases"        test_yum_xmlbase_points_package
 run_test "pkg/xmlbase-refuses-unknown-type"      test_yum_xmlbase_refuses_an_unhandled_metadata_type
 run_test "pkg/xmlbase-unlocatable-package"       test_yum_xmlbase_fails_when_no_release_holds_a_package
 run_test "pkg/resign-backup-survives-resume"     test_resign_backup_survives_a_resumed_run
+run_test "pkg/resign-narrowed-run-ok"            test_resign_narrowed_run_does_not_cry_missing
+run_test "pkg/resign-restore-bad-tag"            test_resign_restore_rejects_a_tag_it_cannot_serve
 run_test "pkg/resign-skips-already-signed"       test_resign_skips_what_is_already_published_signed
 run_test "pkg/rebuild-apt-shrink-by-name"        test_rebuild_apt_shrink_is_compared_by_name
 run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout

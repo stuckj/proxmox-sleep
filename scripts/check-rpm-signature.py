@@ -33,9 +33,9 @@ HEADER_MAGIC = b"\x8e\xad\xe8"
 
 # Signature-header tags that hold an OpenPGP signature packet. RPM's names are
 # historical: RSAHEADER and DSAHEADER hold a signature over the header alone,
-# PGP and GPG one over header+payload, and any tag may carry any algorithm. An
-# ed25519 key lands in DSAHEADER, so omitting 267 reports signed packages as
-# unsigned.
+# PGP and GPG one over header+payload, and any tag may carry any algorithm. The
+# tag an ed25519 signature lands in depends on the signer, so all four are read:
+# rpmsign writes DSAHEADER, and nfpm writes RSAHEADER and PGP.
 SIG_TAGS = {267: "DSAHEADER", 268: "RSAHEADER", 1002: "PGP", 1005: "GPG"}
 
 PUBKEY_ALGO = {1: "RSA", 3: "RSA-sign-only", 17: "DSA", 19: "ECDSA",
