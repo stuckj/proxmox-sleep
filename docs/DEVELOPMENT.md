@@ -365,7 +365,7 @@ bash -n proxmox-sleep-manager.sh
 bash -n proxmox-idle-monitor.sh
 
 # Run shellcheck
-shellcheck -x *.sh
+shellcheck -x *.sh scripts/*.sh
 
 # Test idle check (single iteration)
 ./proxmox-idle-monitor.sh check

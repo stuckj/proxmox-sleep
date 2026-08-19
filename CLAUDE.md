@@ -293,7 +293,7 @@ tests/run-tests.sh gaming     # filter by test name substring
 bash -n proxmox-sleep-manager.sh
 
 # Shellcheck
-shellcheck -x *.sh
+shellcheck -x *.sh scripts/*.sh
 
 # Test single idle check
 ./proxmox-idle-monitor.sh check

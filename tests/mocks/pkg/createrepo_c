@@ -41,12 +41,15 @@ rpms = sorted(f for f in os.listdir(root) if f.endswith(".rpm"))
 out = os.path.join(root, "repodata")
 os.makedirs(out, exist_ok=True)
 
-# createrepo_c stamps each package's filesystem mtime into <time file="...">;
-# yum_xmlbase.py zeroes it so an unchanged package set rebuilds byte-identically.
+# The real tool stamps each package's *filesystem* mtime here, and the packages
+# are re-downloaded on every run, so this value genuinely moves between rebuilds.
+# yum_xmlbase.py zeroes it for exactly that reason; a constant here would let
+# that line be deleted with every test still passing.
 packages = "".join(
     f'<package type="rpm"><name>proxmox-sleep</name>'
     f'<location href="{n}"/>'
-    f'<time file="1750000000" build="1750000000"/></package>\n'
+    f'<time file="{int(os.path.getmtime(os.path.join(root, n)))}" '
+    f'build="1750000000"/></package>\n'
     for n in rpms)
 
 bodies = {

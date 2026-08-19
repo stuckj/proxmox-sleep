@@ -43,7 +43,7 @@ jobs:
             esac
           done < <(find . -type f \
                         \( -name '*.sh' -o -name '*.py' -o -path './tests/mocks/*' \) \
-                        -not -path './.git/*' -not -name '__pycache__' -print0)
+                        -not -path './.git/*' -not -path '*/__pycache__/*' -print0)
 
       - name: Run offline test suite
         run: tests/run-tests.sh

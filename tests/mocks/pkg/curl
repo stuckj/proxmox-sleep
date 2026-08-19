@@ -30,7 +30,16 @@ rel="${rel#*/}"
 src="${MOCK_ASSET_DIR:-/nonexistent}/$rel"
 
 if [[ -f "$src" ]]; then
-    [[ -n "$out" ]] && cp -- "$src" "$out"
+    if [[ -n "$out" ]]; then
+        # A basename in $MOCK_TRUNCATE_ASSETS is served short, the way an
+        # interrupted transfer leaves a file. curl reports success for it, which
+        # is why the caller has to size-check rather than trust the exit status.
+        if [[ " ${MOCK_TRUNCATE_ASSETS:-} " == *" $(basename "$src") "* ]]; then
+            head -c 16 -- "$src" > "$out"
+        else
+            cp -- "$src" "$out"
+        fi
+    fi
     [[ -n "$write" ]] && printf '200'
     exit 0
 fi

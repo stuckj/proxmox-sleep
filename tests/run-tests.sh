@@ -2269,7 +2269,11 @@ test_rebuild_publishes_index_and_signature_together() {
     local W="$SANDBOX/rb" remote="$SANDBOX/ghp.git"
     with_pkg_mocks
     git init -q --bare "$remote"
+    # Two versions, so the index carries more than one stanza and their order
+    # has to be pinned for a rebuild to be reproducible.
+    make_deb v1.0.0 1.0.0
     make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.0.0/proxmox-sleep-1.0.0-1.noarch.rpm" --digests
     fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
     write_releases_tsv joined
 
@@ -2335,6 +2339,26 @@ test_rebuild_retries_a_failed_index_upload() {
     fi
     assert_not_contains "and gh-pages was not published over the failure" \
         "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages 2>&1)" "repomd.xml"
+}
+
+test_rebuild_refuses_a_truncated_download() {
+    # curl reports success for a transfer that stopped early, so the size check
+    # against the release metadata is the only thing between a short file and an
+    # index published with the hash of bytes nobody will receive.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages \
+          MOCK_TRUNCATE_ASSETS=proxmox-sleep_1.1.0_all.deb \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "it refuses to build from a short file" "$rc" 1
+    assert_contains "and names the asset" "$out" "proxmox-sleep_1.1.0_all.deb"
+    assert_contains "as truncated" "$out" "truncated"
 }
 
 test_rebuild_refuses_a_work_dir_inside_a_checkout() {
@@ -2508,6 +2532,7 @@ run_test "pkg/rebuild-yum-points-at-releases"    test_rebuild_yum_index_points_a
 run_test "pkg/rebuild-yum-shrink-names"          test_rebuild_yum_shrink_names_what_went_missing
 run_test "pkg/rebuild-publishes-both-halves"     test_rebuild_publishes_index_and_signature_together
 run_test "pkg/rebuild-retries-upload"            test_rebuild_retries_a_failed_index_upload
+run_test "pkg/rebuild-truncated-download"        test_rebuild_refuses_a_truncated_download
 run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout
 run_test "pkg/rebuild-refuses-foreign-dir"       test_rebuild_refuses_a_directory_it_did_not_create
 run_test "pkg/resign-refuses-whitespace"         test_resign_refuses_a_work_dir_with_whitespace
