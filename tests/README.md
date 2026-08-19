@@ -87,12 +87,10 @@ signature, a non-signature packet, or a truncated file — so what each test
 asserts stays visible in the test rather than in a committed binary.
 
 The tests that drive the release scripts end to end add `mocks/pkg/` to `PATH`
-via `with_pkg_mocks`, which stands in for `gh`, `curl`, `gpg` and `createrepo_c`.
-`mocks/pkg/rpmsign` is deliberately a failing stub: those tests arrange for every
-package to be signed already, so invoking it means the script signed something it
-should have skipped.
+via `with_pkg_mocks`, which stands in for `gh`, `curl`, `gpg`, `createrepo_c` and
+`rpmsign`.
 
-Two of those mocks deliberately model the tool rather than the caller:
+These mocks deliberately model the tool rather than the caller:
 
 - `mocks/pkg/createrepo_c` emits all three metadata types rather than just
   `primary`, because `yum_xmlbase.py` rewrites `primary` and copies the others
@@ -103,7 +101,13 @@ Two of those mocks deliberately model the tool rather than the caller:
   `MOCK_UPLOAD_FAIL_TAGS` has its assets deleted *before* the failure, which is
   what `--clobber` does when the upload half of a replacement breaks. A mock
   that failed without deleting would model a kinder API than the real one and
-  hide what the retries exist for.
+  hide what the retries exist for. With `MOCK_RELEASES_FROM_DISK` it derives its
+  listing from what is on disk now, so a script that replaces assets and then
+  re-reads the API to confirm can be tested at all.
+- `mocks/pkg/rpmsign` rewrites only the signature header and carries the main
+  header and payload through byte for byte — the property the backfill checks
+  after every signing. It builds the packet with `rpm-fixture.py`'s helpers, so
+  the rpm layout has one definition rather than two that can drift.
 
 ## Regressions locked in
 

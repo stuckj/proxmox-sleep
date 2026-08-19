@@ -151,9 +151,12 @@ repositories. It defaults to a **dry run**; publishing requires `DRY_RUN=0`.
 
 ```bash
 # Inspect what would be published, touching nothing
-GPG_KEY_ID=<key> GH_TOKEN=$(gh auth token) \
+GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=$(gh auth token) \
   scripts/rebuild-package-repos.sh /tmp/repobuild
 ```
+
+A dry run still signs the indexes it builds — it just publishes none of them — so
+it needs the passphrase like any other invocation.
 
 `v0.9.0` and `v0.9.1` are excluded by default (`EXCLUDE_TAGS`): both published
 packages built without a version, so both releases carry assets named

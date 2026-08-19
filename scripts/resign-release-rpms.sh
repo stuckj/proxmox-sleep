@@ -279,6 +279,25 @@ say "enumerate published rpms"
 # just the ones this run was asked to touch: judged against a narrowed listing,
 # every release ONLY_TAGS excluded looks like a package that has gone missing.
 enumerate all-assets.tsv
+
+# The releases API is eventually consistent, and this is most often re-run
+# moments after a run that replaced assets. A backed-up package absent from the
+# listing may be a replica that has not caught up rather than one a failed
+# upload deleted -- and the remedy for the latter, uploading the unsigned
+# original back over it, is the wrong move against an asset that is merely not
+# visible yet. Re-read before believing it.
+if [ -s backup/manifest.tsv ]; then
+  for attempt in 1 2 3; do
+    awk -F'\t' 'NR==FNR{a[$1"/"$2];next} !(($1"/"$2) in a)' \
+        all-assets.tsv backup/manifest.tsv > not-listed.txt
+    [ -s not-listed.txt ] || break
+    if [ "$attempt" = 3 ]; then break; fi
+    echo "  $(wc -l < not-listed.txt) backed-up package(s) not in the listing yet (attempt $attempt)"
+    sleep "${ENUM_RETRY_DELAY:-5}"
+    enumerate all-assets.tsv
+  done
+fi
+
 cp all-assets.tsv assets.tsv
 
 if [ -n "$ONLY_TAGS" ]; then
