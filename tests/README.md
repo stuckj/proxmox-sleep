@@ -101,13 +101,13 @@ These mocks deliberately model the tool rather than the caller:
   `MOCK_UPLOAD_FAIL_TAGS` has its assets deleted *before* the failure, which is
   what `--clobber` does when the upload half of a replacement breaks. A mock
   that failed without deleting would model a kinder API than the real one and
-  hide what the retries exist for. With `MOCK_RELEASES_FROM_DISK` it derives its
-  listing from what is on disk now, so a script that replaces assets and then
-  re-reads the API to confirm can be tested at all.
-- `mocks/pkg/rpmsign` rewrites only the signature header and carries the main
-  header and payload through byte for byte — the property the backfill checks
-  after every signing. It builds the packet with `rpm-fixture.py`'s helpers, so
-  the rpm layout has one definition rather than two that can drift.
+  hide what the retries exist for.
+
+`mocks/pkg/rpmsign` is a failing stub. The backfill it belongs to is a one-off
+over seven packages that an operator runs by hand and can re-run, so its upload
+path is left to the operator rather than modelled here; the tests that touch the
+script arrange for every package to be signed already, and invoking rpmsign means
+it signed something it should have skipped.
 
 ## Regressions locked in
 

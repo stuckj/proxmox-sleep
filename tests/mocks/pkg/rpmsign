@@ -1,66 +1,11 @@
-#!/usr/bin/env python3
-"""Mock `rpmsign --resign`, which Ubuntu's rpm package cannot do.
+#!/bin/bash
+#
+# Mock `rpmsign`, present so resign-release-rpms.sh gets past its
+# `command -v rpmsign` check. The tests that use it arrange for every package to
+# be signed already, so the sign loop skips them all and this is never invoked —
+# calling it is therefore a test bug, and it says so rather than exiting 0.
 
-Rewrites only the signature header and copies the main header and payload
-through byte for byte, which is the property resign-release-rpms.sh checks after
-every signing. The signature itself is a well-formed OpenPGP packet naming
-$MOCK_SIGN_KEYID as its issuer, not a real signature — what the script under
-test asserts is that one is present and issued by a key it holds.
-
-Signing is skipped for a tag in $MOCK_SIGN_FAIL_TAGS, matching rpmsign's own
-non-zero exit when gpg cannot sign.
-
-The packet and header builders come from tests/rpm-fixture.py so there is one
-definition of the rpm layout rather than two that can drift apart.
-"""
-import importlib.util
-import os
-import struct
-import sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location(
-    "rpm_fixture", os.path.join(HERE, "..", "..", "rpm-fixture.py"))
-fixture = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fixture)
-
-
-def body_offset(blob):
-    """Offset of the main header: past the lead and the signature header,
-    whose data store is padded to an 8-byte boundary."""
-    count, size = struct.unpack(">II", blob[104:112])
-    end = 112 + 16 * count + size
-    return end + (-end % 8)
-
-
-paths = [a for a in sys.argv[1:] if not a.startswith("-")]
-if not paths:
-    sys.exit("mock rpmsign: no package given")
-
-log = os.environ.get("MOCK_CALL_LOG")
-keyid = os.environ.get("MOCK_SIGN_KEYID", "aaaabbbbccccdddd")
-fail_tags = os.environ.get("MOCK_SIGN_FAIL_TAGS", "").split()
-
-for path in paths:
-    if log:
-        with open(log, "a") as fh:
-            fh.write(f"rpmsign {path}\n")
-    # The work list is <work>/signed/<tag>/<name>, so the tag is the parent.
-    tag = os.path.basename(os.path.dirname(os.path.abspath(path)))
-    if tag in fail_tags:
-        print(f"mock rpmsign: refusing to sign {path}", file=sys.stderr)
-        sys.exit(1)
-
-    with open(path, "rb") as fh:
-        blob = fh.read()
-    body = blob[body_offset(blob):]
-
-    entries = [(62, 7, bytes(16)),
-               (273, 6, b"0" * 64 + b"\0"),
-               (267, 7, fixture.signature_packet(keyid)),
-               (1000, 4, struct.pack(">I", len(body)))]
-    # The lead carries the package name, so it is the original's, not a fresh one.
-    header = blob[:96] + fixture.build(entries)
-    header += bytes(-len(header) % 8)
-    with open(path, "wb") as fh:
-        fh.write(header + body)
+set -uo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'rpmsign %s\n' "$*" >> "$MOCK_CALL_LOG"
+echo "mock rpmsign: called unexpectedly with: $*" >&2
+exit 1

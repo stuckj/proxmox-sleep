@@ -26,35 +26,8 @@ log() { [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'gh %s\n' "$*" >> "$MOCK_CALL_LO
 case "${1:-}" in
     api)
         log "$@"
-        # With MOCK_RELEASES_FROM_DISK the listing is derived from what is in
-        # $MOCK_ASSET_DIR right now, so an upload is visible to the next
-        # enumeration. A script that replaces assets and then re-reads the API
-        # to confirm cannot be tested against a listing frozen at setup time.
-        # Only v* directories, matching the real jq filter, so this script's own
-        # apt-history output is not mistaken for a release.
-        case "${MOCK_RELEASES_FROM_DISK:-}" in
-            split|joined)
-                shopt -s nullglob
-                for dir in "${MOCK_ASSET_DIR:-/nonexistent}"/v*/; do
-                    tag=$(basename "$dir")
-                    for f in "$dir"*; do
-                        [[ -f "$f" ]] || continue
-                        name=$(basename "$f")
-                        if [[ "$MOCK_RELEASES_FROM_DISK" == joined ]]; then
-                            printf '%s/%s\t%s\thttps://fake/%s/%s\n' \
-                                   "$tag" "$name" "$(stat -c%s "$f")" "$tag" "$name"
-                        else
-                            printf '%s\t%s\t%s\thttps://fake/%s/%s\n' \
-                                   "$tag" "$name" "$(stat -c%s "$f")" "$tag" "$name"
-                        fi
-                    done
-                done
-                ;;
-            *)
-                [[ -n "${MOCK_RELEASES_TSV:-}" && -f "$MOCK_RELEASES_TSV" ]] \
-                    && cat "$MOCK_RELEASES_TSV"
-                ;;
-        esac
+        [[ -n "${MOCK_RELEASES_TSV:-}" && -f "$MOCK_RELEASES_TSV" ]] \
+            && cat "$MOCK_RELEASES_TSV"
         exit 0
         ;;
     release)

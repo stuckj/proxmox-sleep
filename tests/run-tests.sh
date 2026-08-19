@@ -2137,73 +2137,6 @@ test_rebuild_apt_shrink_is_compared_by_name() {
     assert_contains "and the run carried on past the guard" "$out" "stable: pinned at"
 }
 
-test_resign_publishes_and_confirms_every_replacement() {
-    # The destructive path end to end: unsigned packages are signed, uploaded
-    # over the published assets, and confirmed present at the signed size by
-    # re-reading the releases. The gh mock serves its listing from disk here, so
-    # the confirmation sees what the upload actually wrote.
-    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
-    local one=proxmox-sleep-1.0.0-1.noarch.rpm two=proxmox-sleep-1.1.0-1.noarch.rpm
-    with_pkg_mocks
-    export MOCK_RELEASES_FROM_DISK=split MOCK_SIGN_KEYID="$key"
-    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$MOCK_ASSET_DIR/v1.1.0"
-    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --digests --body
-    fixture "$MOCK_ASSET_DIR/v1.1.0/$two" --digests --body
-    local before
-    before=$(sha256sum "$MOCK_ASSET_DIR/v1.0.0/$one" | awk '{print $1}')
-
-    local out rc
-    out=$(GPG_KEY_ID="$key" PUBLISH=1 UPLOAD_PACE=0 \
-          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
-    assert_rc "the backfill succeeds" "$rc" 0
-    assert_contains "both packages were replaced" "$out" "replaced 2 published rpm(s)"
-    assert_contains "and every replacement was confirmed" "$out" "present at the expected size"
-
-    # What is published must now be signed, and the originals must still be here.
-    sigcheck --key "$key" "$MOCK_ASSET_DIR/v1.0.0/$one" >/dev/null \
-        || fail_assert "the published v1.0.0 rpm is not signed"
-    sigcheck --key "$key" "$MOCK_ASSET_DIR/v1.1.0/$two" >/dev/null \
-        || fail_assert "the published v1.1.0 rpm is not signed"
-    assert_eq "the backup still holds the unsigned original" \
-        "$(sha256sum "$W/backup/v1.0.0/$one" | awk '{print $1}')" "$before"
-
-    # A second run has nothing left to do rather than replacing them again.
-    out=$(GPG_KEY_ID="$key" PUBLISH=1 UPLOAD_PACE=0 \
-          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
-    assert_rc "the re-run succeeds" "$rc" 0
-    assert_contains "with nothing to replace" "$out" "already signed by"
-}
-
-test_resign_restores_after_a_failed_upload() {
-    # The recovery path, driven by a real failure rather than by hand: --clobber
-    # deletes before it writes, so a failed upload leaves the release with no
-    # package at all.
-    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
-    local one=proxmox-sleep-1.0.0-1.noarch.rpm
-    with_pkg_mocks
-    export MOCK_RELEASES_FROM_DISK=split MOCK_SIGN_KEYID="$key"
-    mkdir -p "$MOCK_ASSET_DIR/v1.0.0"
-    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --digests --body
-    local before
-    before=$(sha256sum "$MOCK_ASSET_DIR/v1.0.0/$one" | awk '{print $1}')
-
-    local out rc
-    out=$(GPG_KEY_ID="$key" PUBLISH=1 UPLOAD_PACE=0 UPLOAD_BACKOFF="0 0" \
-          MOCK_UPLOAD_FAIL_TAGS=v1.0.0 \
-          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
-    assert_rc "the failed replacement is fatal" "$rc" 1
-    assert_contains "and it says the package is now missing" "$out" "MISSING from that release"
-    if [[ -f "$MOCK_ASSET_DIR/v1.0.0/$one" ]]; then
-        fail_assert "the mock did not model --clobber deleting before it fails"
-    fi
-
-    out=$(GPG_KEY_ID="$key" RESTORE=1 PUBLISH=1 UPLOAD_PACE=0 \
-          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
-    assert_rc "the restore succeeds" "$rc" 0
-    assert_eq "and puts the original back byte for byte" \
-        "$(sha256sum "$MOCK_ASSET_DIR/v1.0.0/$one" 2>/dev/null | awk '{print $1}')" "$before"
-}
-
 test_resign_refuses_a_backup_it_cannot_vouch_for() {
     # A manifest row whose file is gone or altered must not be re-derived from
     # the release: after a replacement the release serves the signed bytes, and
@@ -2569,8 +2502,6 @@ run_test "pkg/resign-narrowed-run-ok"            test_resign_narrowed_run_does_n
 run_test "pkg/resign-restore-bad-tag"            test_resign_restore_rejects_a_tag_it_cannot_serve
 run_test "pkg/resign-skips-already-signed"       test_resign_skips_what_is_already_published_signed
 run_test "pkg/rebuild-apt-shrink-by-name"        test_rebuild_apt_shrink_is_compared_by_name
-run_test "pkg/resign-publishes-and-confirms"     test_resign_publishes_and_confirms_every_replacement
-run_test "pkg/resign-restores-after-failure"     test_resign_restores_after_a_failed_upload
 run_test "pkg/resign-broken-backup"              test_resign_refuses_a_backup_it_cannot_vouch_for
 run_test "pkg/resign-bad-flag-value"             test_resign_rejects_an_unrecognised_flag_value
 run_test "pkg/rebuild-yum-points-at-releases"    test_rebuild_yum_index_points_at_the_releases

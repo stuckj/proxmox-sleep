@@ -17,8 +17,6 @@ Usage:
   --not-a-sig   put a well-formed OpenPGP packet that is *not* a signature in
                 the signature tag, so a checker that trusts the tag's presence
                 rather than its contents reports the package as signed
-  --body        append a main header and payload after the signature header,
-                which anything that re-signs the file has to carry through
   --truncate    cut the file off inside the signature header
 """
 import struct
@@ -65,7 +63,7 @@ def main(argv):
     out = argv[0]
     sig_tags = []
     issuer = "cdb7b8f88afccbe3"
-    digests = truncate = not_a_sig = body = False
+    digests = truncate = not_a_sig = False
     i = 1
     while i < len(argv):
         if argv[i] == "--sig-tag":
@@ -76,8 +74,6 @@ def main(argv):
             digests = True; i += 1
         elif argv[i] == "--not-a-sig":
             not_a_sig = True; i += 1
-        elif argv[i] == "--body":
-            body = True; i += 1
         elif argv[i] == "--truncate":
             truncate = True; i += 1
         else:
@@ -93,10 +89,6 @@ def main(argv):
     entries.append((1000, 4, struct.pack(">I", 4096)))  # SIZE
 
     blob = LEAD + build(entries)
-    if body:
-        # The main header starts on an 8-byte boundary after the signature
-        # header's data store; HEADER_MAGIC marks it.
-        blob += bytes(-len(blob) % 8) + b"\x8e\xad\xe8\x01" + bytes(4) + b"payload" * 8
     if truncate:
         blob = blob[:len(LEAD) + 20]
     with open(out, "wb") as fh:
