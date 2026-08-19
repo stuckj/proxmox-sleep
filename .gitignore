@@ -1,0 +1,4 @@
+# Byte-compiled Python. The test suite imports tests/rpm-fixture.py from a mock,
+# and the CI syntax check py_compiles every .py, so these appear during a run.
+__pycache__/
+*.pyc
