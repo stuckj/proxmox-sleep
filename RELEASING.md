@@ -178,7 +178,7 @@ not. Run it on Fedora, or in a container:
 
 ```bash
 podman run --rm -it -v "$PWD:/repo" -v "$HOME/.gnupg:/root/.gnupg" fedora:latest bash
-dnf install -y rpm-sign gnupg2 gh python3
+dnf install -y rpm-sign gnupg2 git-core gh python3
 
 export GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=<token>
 

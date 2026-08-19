@@ -316,6 +316,12 @@ PY
 check_no_shrink() {  # check_no_shrink <release-tag>
   local tag="$1" prev=0 now http
   now=$(grep -c '^Package:' "apt/history/Packages")
+  # Compared as sets of package names, not as totals: a rebuild that adds as
+  # many packages as an earlier failure dropped nets out, and a count would call
+  # that unchanged. Comparing names also lets the failure say which package went.
+  # Basenames, because the Filename is a path relative to the index.
+  sed -n 's|^Filename: ||p' "apt/history/Packages" | sed 's|.*/||' \
+    | LC_ALL=C sort -u > apt-now-names.txt
   # Read the status, not curl's exit code: `curl -f` returns 22 for every HTTP
   # error alike, so keying on it would treat a 503 as "nothing published yet"
   # and disable this guard during exactly the GitHub incident that also makes
@@ -323,28 +329,44 @@ check_no_shrink() {  # check_no_shrink <release-tag>
   http=$(curl -sSL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 120 \
               -o prev-Packages -w '%{http_code}' "$BASE/$tag/Packages" 2>/dev/null || true)
   [ -n "$http" ] || http=000
+  : > apt-prev-names.txt
   case "$http" in
-    200) prev=$(grep -c '^Package:' prev-Packages || true) ;;
+    200) prev=$(grep -c '^Package:' prev-Packages || true)
+         sed -n 's|^Filename: ||p' prev-Packages | sed 's|.*/||' \
+           | LC_ALL=C sort -u > apt-prev-names.txt ;;
     404) prev=0 ;;   # nothing published yet, so nothing to shrink
     *)   die "cannot read the published history index to compare against (HTTP $http)" ;;
   esac
   rm -f prev-Packages
-  if [ "$prev" -gt "$now" ] && [ "${ALLOW_SHRINK:-0}" != 1 ]; then
-    die "the history index would shrink from $prev to $now entries. If a release
-       was deliberately deleted, re-run with ALLOW_SHRINK=1; otherwise the
-       releases API returned an incomplete view and re-running should fix it."
+  # A 200 that lists packages but yields no names is a layout this cannot
+  # compare, and silently reporting nothing gone is the wrong answer for it.
+  if [ "$prev" -gt 0 ] && [ ! -s apt-prev-names.txt ]; then
+    die "the published history index lists $prev package(s) but no Filename
+       could be read from it — refusing to compare against a listing this
+       script cannot parse"
+  fi
+  : > apt-gone.txt
+  if [ -s apt-prev-names.txt ]; then
+    LC_ALL=C comm -23 apt-prev-names.txt apt-now-names.txt > apt-gone.txt
+    # An excluded release's packages drop out deliberately, as in the YUM check.
+    if [ -s excluded-names.txt ]; then
+      LC_ALL=C comm -23 apt-gone.txt excluded-names.txt > apt-gone.tmp
+      mv apt-gone.tmp apt-gone.txt
+    fi
+  fi
+  if [ -s apt-gone.txt ] && [ "${ALLOW_SHRINK:-0}" != 1 ]; then
+    SHRUNK="${SHRUNK:+$SHRUNK }apt-history"
+    { echo "  apt-history has lost:"; sed 's/^/    /' apt-gone.txt; } >&2
   fi
   echo "  history: $now entries (currently published: $prev)"
 }
 
 build_apt_history stage/deb "$PKG"
-check_no_shrink apt-history
 
-# The YUM equivalent, counting packages rather than Packages stanzas. The
-# published primary.xml is the comparison point because it is what clients
-# actually resolve; a count taken from the staged rpms alone could only ever
-# agree with itself.
-say "check the published YUM index against the release assets"
+# The YUM equivalent, reading names out of primary.xml rather than out of
+# Packages stanzas. The published primary.xml is the comparison point because it
+# is what clients actually resolve; a count taken from the staged rpms alone
+# could only ever agree with itself.
 check_no_shrink_yum() {  # check_no_shrink_yum <pages-subdir> <stage-dir>
   local out="$1" dir="$2" now prev=0 http href declared
   now=$(find "$dir" -name '*.rpm' | wc -l)
@@ -423,7 +445,11 @@ check_no_shrink_yum() {  # check_no_shrink_yum <pages-subdir> <stage-dir>
   echo "  $out: $now packages (currently published: $prev)"
 }
 
+# Both indexes are compared before either is judged, so one report names
+# everything missing rather than stopping at whichever was checked first.
+say "check the published indexes against the release assets"
 SHRUNK=""
+check_no_shrink apt-history
 check_no_shrink_yum yum stage/rpm
 if [ -n "$SHRUNK" ]; then
   die "the packages listed above are published in [$SHRUNK] but are no longer

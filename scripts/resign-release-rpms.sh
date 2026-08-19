@@ -145,6 +145,21 @@ upload_tag() {  # upload_tag <tag> <file>...
 if [ "$RESTORE" = 1 ]; then
   say "restore the backed-up originals"
   [ -s backup/manifest.tsv ] || die "no backup manifest under $WORK/backup — nothing to restore"
+  # ONLY_TAGS narrows a restore to the releases that actually lost a package, so
+  # recovering from a part-finished run does not also revert every release it
+  # had already replaced.
+  cp backup/manifest.tsv restore-manifest.tsv
+  if [ -n "$ONLY_TAGS" ]; then
+    set -f
+    # shellcheck disable=SC2086
+    printf '%s\n' $ONLY_TAGS | LC_ALL=C sort -u > wanted.txt
+    set +f
+    awk -F'\t' 'NR==FNR{w[$1];next} $1 in w' wanted.txt restore-manifest.tsv > filtered.tsv
+    mv filtered.tsv restore-manifest.tsv
+    [ -s restore-manifest.tsv ] \
+      || die "the manifest holds nothing for tag(s): $ONLY_TAGS"
+    echo "  limited to: $ONLY_TAGS"
+  fi
   bad=0
   while IFS=$'\t' read -r tag name size sha; do
     f="backup/$tag/$name"
@@ -152,17 +167,17 @@ if [ "$RESTORE" = 1 ]; then
     [ "$(stat -c%s "$f")" = "$size" ] || { echo "  WRONG SIZE $tag/$name" >&2; bad=$((bad+1)); continue; }
     [ "$(sha256sum "$f" | awk '{print $1}')" = "$sha" ] \
       || { echo "  WRONG CHECKSUM $tag/$name" >&2; bad=$((bad+1)); }
-  done < backup/manifest.tsv
+  done < restore-manifest.tsv
   [ "$bad" = 0 ] || die "$bad backup file(s) do not match the manifest — refusing to restore from them"
-  echo "  $(wc -l < backup/manifest.tsv) file(s) verified against the manifest"
+  echo "  $(wc -l < restore-manifest.tsv) file(s) verified against the manifest"
   if [ "$PUBLISH" != 1 ]; then
     say "dry run — nothing uploaded"
     echo "  re-run with RESTORE=1 PUBLISH=1 to put them back"
     exit 0
   fi
-  cut -f1 backup/manifest.tsv | LC_ALL=C sort -u > restore-tags.txt
+  cut -f1 restore-manifest.tsv | LC_ALL=C sort -u > restore-tags.txt
   while read -r tag; do
-    mapfile -t paths < <(awk -F'\t' -v t="$tag" '$1 == t {print "backup/" $1 "/" $2}' backup/manifest.tsv)
+    mapfile -t paths < <(awk -F'\t' -v t="$tag" '$1 == t {print "backup/" $1 "/" $2}' restore-manifest.tsv)
     echo "  $tag"
     upload_tag "$tag" "${paths[@]}" || die "could not restore the assets of $tag"
     [ "$UPLOAD_PACE" = 0 ] || sleep "$UPLOAD_PACE"
@@ -259,26 +274,91 @@ echo "  $total rpm asset(s) across $(cut -f1 assets.tsv | sort -u | wc -l) relea
 
 # ---------------------------------------------------------------- back up
 
-say "back up every published rpm"
-# Written before anything is signed and long before anything is uploaded. This
-# is the only copy of the original bytes once an asset has been replaced.
-: > backup/manifest.tsv
+say "fetch what each release currently serves"
+# Kept apart from backup/: this is refetched every run and is what gets signed,
+# so the skip test below asks whether the *published* package is signed rather
+# than whether the backed-up original was.
 while IFS=$'\t' read -r tag name size url; do
-  mkdir -p "backup/$tag"
-  dst="backup/$tag/$name"
-  if [ ! -f "$dst" ] || [ "$(stat -c%s "$dst")" != "$size" ]; then
-    curl -fsSL --retry 3 --retry-delay 2 \
-         --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
-         -o "$dst" "$url" || die "could not download $tag/$name"
-  fi
+  mkdir -p "current/$tag"
+  dst="current/$tag/$name"
+  curl -fsSL --retry 3 --retry-delay 2 \
+       --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+       -o "$dst" "$url" || die "could not download $tag/$name"
   # A short read would otherwise be signed and uploaded over the intact original.
   got=$(stat -c%s "$dst")
   [ "$got" = "$size" ] || die "$tag/$name downloaded as $got bytes, expected $size"
-  printf '%s\t%s\t%s\t%s\n' "$tag" "$name" "$size" \
-         "$(sha256sum "$dst" | awk '{print $1}')" >> backup/manifest.tsv
 done < assets.tsv
+echo "  $(wc -l < assets.tsv) file(s) fetched"
+
+say "back up every published rpm"
+# Recorded before anything is signed and long before anything is uploaded. Once
+# an asset has been replaced this is the only copy of the original bytes.
+#
+# Merged, never rebuilt from the current listing. Two things would otherwise be
+# lost on a second run: a package a failed replacement deleted is no longer
+# enumerated at all, and it is exactly the one that exists nowhere else; and a
+# package already replaced now serves *signed* bytes, which fetching over the
+# backup would record as though they were the original.
+touch backup/manifest.tsv
+cp backup/manifest.tsv manifest.prev
+: > manifest.new
+while IFS=$'\t' read -r tag name size url; do
+  mkdir -p "backup/$tag"
+  dst="backup/$tag/$name"
+  recorded=$(awk -F'\t' -v t="$tag" -v n="$name" '$1 == t && $2 == n {print $4; exit}' manifest.prev)
+  if [ -n "$recorded" ] && [ -f "$dst" ] \
+     && [ "$(sha256sum "$dst" | awk '{print $1}')" = "$recorded" ]; then
+    # Already held, and the bytes still match what was recorded. Left untouched.
+    awk -F'\t' -v t="$tag" -v n="$name" '$1 == t && $2 == n {print; exit}' manifest.prev >> manifest.new
+    continue
+  fi
+  cp -- "current/$tag/$name" "$dst"
+  printf '%s\t%s\t%s\t%s\n' "$tag" "$name" "$(stat -c%s "$dst")" \
+         "$(sha256sum "$dst" | awk '{print $1}')" >> manifest.new
+done < assets.tsv
+
+# Carry forward rows whose asset is no longer on its release. A previous run
+# deleted it and did not put it back, so this copy is the only one left and
+# restoring it is the whole point of the manifest.
+: > manifest.readd
+while IFS=$'\t' read -r tag name size sha; do
+  if awk -F'\t' -v t="$tag" -v n="$name" '$1 == t && $2 == n {f=1} END {exit !f}' manifest.new; then
+    continue
+  fi
+  if [ -f "backup/$tag/$name" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$tag" "$name" "$size" "$sha" >> manifest.readd
+  else
+    die "backup/manifest.tsv records $tag/$name, but neither the release nor
+       $WORK/backup/$tag holds it — refusing to continue with a manifest that
+       cannot be restored from."
+  fi
+done < manifest.prev
+if [ -s manifest.readd ]; then
+  cat manifest.readd >> manifest.new
+fi
+mv manifest.new backup/manifest.tsv
+rm -f manifest.prev
 echo "  $(wc -l < backup/manifest.tsv) file(s) in $WORK/backup, checksummed in backup/manifest.tsv"
 echo "  restore them at any time with: RESTORE=1 PUBLISH=1 $0 $WORK"
+
+# A package that is backed up but no longer on its release was deleted by the
+# upload half of an earlier replacement. It exists nowhere else, so putting it
+# back comes before anything else this script could do -- and carrying on to
+# sign the rest would end in a tidy "nothing to do" over a release with no
+# package on it.
+if [ -s manifest.readd ]; then
+  gone_tags=$(cut -f1 manifest.readd | LC_ALL=C sort -u | tr '\n' ' ')
+  echo "  MISSING FROM THEIR RELEASE:" >&2
+  cut -f1,2 manifest.readd | sed 's|^|    |;s|\t|/|' >&2
+  rm -f manifest.readd
+  die "the package(s) listed above are in $WORK/backup but not on their release.
+       Put them back first:
+
+         RESTORE=1 PUBLISH=1 ONLY_TAGS='${gone_tags% }' $0 $WORK
+
+       then run this again, and rebuild the package repositories afterwards."
+fi
+rm -f manifest.readd
 
 # ---------------------------------------------------------------- sign
 
@@ -289,7 +369,10 @@ signed=0; skipped=0; failed=0
 
 while IFS=$'\t' read -r tag name size url; do
   mkdir -p "signed/$tag"
-  src="backup/$tag/$name"
+  # The published bytes, not the backed-up original: after a partial run the two
+  # differ for every release already replaced, and asking the original whether
+  # it is signed would re-sign and re-upload all of them.
+  src="current/$tag/$name"
   dst="signed/$tag/$name"
 
   # Already signed by *this* key: nothing to do. Asking whose signature it is,

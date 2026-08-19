@@ -1,0 +1,49 @@
+#!/bin/bash
+#
+# Mock `gh` for the packaging tests.
+#
+#   gh api repos/<owner>/<repo>/releases ...   prints $MOCK_RELEASES_TSV, which
+#                                              holds the tag/name/size/url rows
+#                                              the real jq filter would produce
+#   gh release upload <tag> <file>...          records the call and succeeds,
+#                                              unless the tag is in
+#                                              $MOCK_UPLOAD_FAIL_TAGS
+#
+# Only what the release scripts actually call is implemented; anything else is
+# an error rather than a silent success, so a new call site is noticed.
+
+set -uo pipefail
+
+log() { [[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'gh %s\n' "$*" >> "$MOCK_CALL_LOG"; return 0; }
+
+case "${1:-}" in
+    api)
+        log "$@"
+        [[ -n "${MOCK_RELEASES_TSV:-}" && -f "$MOCK_RELEASES_TSV" ]] \
+            && cat "$MOCK_RELEASES_TSV"
+        exit 0
+        ;;
+    release)
+        sub="${2:-}"
+        tag="${3:-}"
+        log "$@"
+        case "$sub" in
+            upload)
+                for t in ${MOCK_UPLOAD_FAIL_TAGS:-}; do
+                    if [[ "$t" == "$tag" ]]; then
+                        echo "mock: upload refused for $tag" >&2
+                        exit 1
+                    fi
+                done
+                exit 0
+                ;;
+            view)   exit 0 ;;
+            create) exit 0 ;;
+            *) echo "mock gh: unhandled 'release $sub'" >&2; exit 64 ;;
+        esac
+        ;;
+    *)
+        echo "mock gh: unhandled subcommand '${1:-}'" >&2
+        exit 64
+        ;;
+esac

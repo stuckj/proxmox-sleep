@@ -1928,6 +1928,152 @@ test_yum_xmlbase_fails_when_no_release_holds_a_package() {
     assert_contains "names the package" "$out" "proxmox-sleep-9.9.9-1.noarch.rpm"
 }
 
+# The release scripts talk to GitHub and to gpg; `mocks/pkg` stands in for both,
+# plus rpmsign. Added to PATH only by the tests that need it.
+with_pkg_mocks() {
+    export PATH="$MOCKS/pkg:$PATH"
+    export MOCK_ASSET_DIR="$SANDBOX/assets"
+    export MOCK_RELEASES_TSV="$SANDBOX/releases.tsv"
+    export HOME="$SANDBOX/home"
+    unset XDG_CONFIG_HOME
+    mkdir -p "$HOME" "$MOCK_ASSET_DIR"
+}
+
+# The listing the gh mock serves. The two scripts pass different jq filters, so
+# they get different shapes out of the same API call and the mock has to be fed
+# the one its caller expects:
+#   joined  "<tag>/<name>\t<size>\t<url>"          rebuild-package-repos.sh
+#   split   "<tag>\t<name>\t<size>\t<url>"         resign-release-rpms.sh
+write_releases_tsv() { # <joined|split>
+    local shape="$1" f tag name
+    : > "$MOCK_RELEASES_TSV"
+    while IFS= read -r f; do
+        tag=$(basename "$(dirname "$f")")
+        name=$(basename "$f")
+        if [[ "$shape" == joined ]]; then
+            printf '%s/%s\t%s\thttps://fake/%s/%s\n' \
+                   "$tag" "$name" "$(stat -c%s "$f")" "$tag" "$name" >> "$MOCK_RELEASES_TSV"
+        else
+            printf '%s\t%s\t%s\thttps://fake/%s/%s\n' \
+                   "$tag" "$name" "$(stat -c%s "$f")" "$tag" "$name" >> "$MOCK_RELEASES_TSV"
+        fi
+    done < <(find "$MOCK_ASSET_DIR" \( -name '*.rpm' -o -name '*.deb' \) | LC_ALL=C sort)
+}
+
+# A real .deb, because the rebuild script reads its version with dpkg-deb.
+make_deb() { # <tag> <version>
+    local tag="$1" v="$2" root="$SANDBOX/debbuild/$2"
+    mkdir -p "$root/DEBIAN" "$MOCK_ASSET_DIR/$tag"
+    { echo "Package: proxmox-sleep"; echo "Version: $v"; echo "Architecture: all"
+      echo "Maintainer: test <test@example.invalid>"; echo "Description: test"
+    } > "$root/DEBIAN/control"
+    dpkg-deb --build --root-owner-group "$root" \
+             "$MOCK_ASSET_DIR/$tag/proxmox-sleep_${v}_all.deb" >/dev/null
+}
+
+test_resign_backup_survives_a_resumed_run() {
+    # A run that dies between the delete and the upload leaves one release
+    # without its package and others already replaced. The recovery path has to
+    # survive being re-run: the manifest must keep the row for the package that
+    # is now missing -- it exists nowhere else -- and the backed-up original
+    # must not be overwritten by the signed bytes now being served.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm two=proxmox-sleep-1.1.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$MOCK_ASSET_DIR/v1.1.0"
+    # Signed by the key the run is given, so the sign loop skips both and this
+    # exercises the backup alone.
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    fixture "$MOCK_ASSET_DIR/v1.1.0/$two" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the first run succeeds" "$rc" 0
+    assert_eq "both packages are backed up" "$(wc -l < "$W/backup/manifest.tsv")" "2"
+    local orig
+    orig=$(sha256sum "$W/backup/v1.0.0/$one" | awk '{print $1}')
+
+    # v1.0.0 now serves re-signed bytes; v1.1.0's asset was deleted by an upload
+    # that never landed.
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key"
+    rm -f "$MOCK_ASSET_DIR/v1.1.0/$two"
+    write_releases_tsv split
+
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the second run refuses to report success" "$rc" 1
+    assert_contains "it names the missing package" "$out" "v1.1.0/$two"
+    assert_contains "and gives the restore command" "$out" "RESTORE=1 PUBLISH=1"
+
+    assert_eq "the manifest still covers both" "$(wc -l < "$W/backup/manifest.tsv")" "2"
+    assert_contains "including the one no longer on its release" \
+        "$(cat "$W/backup/manifest.tsv")" "v1.1.0"
+    assert_eq "the backed-up original was not overwritten" \
+        "$(sha256sum "$W/backup/v1.0.0/$one" | awk '{print $1}')" "$orig"
+    if [[ ! -f "$W/backup/v1.1.0/$two" ]]; then
+        fail_assert "the deleted package's only remaining copy was removed"
+    fi
+}
+
+test_resign_skips_what_is_already_published_signed() {
+    # After a part-finished run, a release already replaced serves signed bytes
+    # while the backup still holds the unsigned original. The skip test has to
+    # ask the published package: asking the backup would re-sign and re-upload
+    # every release the previous run had already done.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd name=proxmox-sleep-1.0.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$W/backup/v1.0.0"
+    : > "$W/.resign-marker"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$name" --sig-tag 267 --issuer "$key" --digests
+    fixture "$W/backup/v1.0.0/$name" --digests
+    printf '%s\t%s\t%s\t%s\n' v1.0.0 "$name" \
+           "$(stat -c%s "$W/backup/v1.0.0/$name")" \
+           "$(sha256sum "$W/backup/v1.0.0/$name" | awk '{print $1}')" > "$W/backup/manifest.tsv"
+    write_releases_tsv split
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the run succeeds with nothing to do" "$rc" 0
+    assert_contains "it reports the package as already signed" "$out" "already signed by"
+    assert_not_contains "rpmsign was never invoked" "$out" "mock rpmsign"
+}
+
+test_rebuild_apt_shrink_is_compared_by_name() {
+    # One version leaves the releases and another arrives in the same run, so
+    # the entry count is unchanged. Comparing totals sees nothing wrong and
+    # publishes an index that has silently dropped a version.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    make_deb v1.2.0 1.2.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    fixture "$MOCK_ASSET_DIR/v1.2.0/proxmox-sleep-1.2.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    # The published index still lists 1.0.0, which no release holds any more.
+    mkdir -p "$MOCK_ASSET_DIR/apt-history"
+    { echo "Package: proxmox-sleep"; echo "Version: 1.0.0"
+      echo "Filename: ../v1.0.0/proxmox-sleep_1.0.0_all.deb"; echo ""
+      echo "Package: proxmox-sleep"; echo "Version: 1.1.0"
+      echo "Filename: ../v1.1.0/proxmox-sleep_1.1.0_all.deb"; echo ""
+    } > "$MOCK_ASSET_DIR/apt-history/Packages"
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "it refuses to publish" "$rc" 1
+    assert_contains "it names the version that would be dropped" "$out" \
+        "proxmox-sleep_1.0.0_all.deb"
+    assert_contains "and says the index lost it" "$out" "apt-history has lost"
+
+    # The same run is allowed through when the loss is deliberate.
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages ALLOW_SHRINK=1 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1)
+    assert_not_contains "ALLOW_SHRINK=1 suppresses the refusal" "$out" "apt-history has lost"
+}
+
 test_rebuild_refuses_a_work_dir_inside_a_checkout() {
     # The work directory is wiped, so a path inside a checkout would delete
     # tracked files.
@@ -2087,6 +2233,9 @@ run_test "pkg/sig-truncated-fails"               test_rpm_signature_truncated_fi
 run_test "pkg/xmlbase-points-at-releases"        test_yum_xmlbase_points_packages_at_releases
 run_test "pkg/xmlbase-refuses-unknown-type"      test_yum_xmlbase_refuses_an_unhandled_metadata_type
 run_test "pkg/xmlbase-unlocatable-package"       test_yum_xmlbase_fails_when_no_release_holds_a_package
+run_test "pkg/resign-backup-survives-resume"     test_resign_backup_survives_a_resumed_run
+run_test "pkg/resign-skips-already-signed"       test_resign_skips_what_is_already_published_signed
+run_test "pkg/rebuild-apt-shrink-by-name"        test_rebuild_apt_shrink_is_compared_by_name
 run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout
 run_test "pkg/rebuild-refuses-foreign-dir"       test_rebuild_refuses_a_directory_it_did_not_create
 run_test "pkg/resign-refuses-whitespace"         test_resign_refuses_a_work_dir_with_whitespace

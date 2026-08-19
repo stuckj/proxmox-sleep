@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Mock `gpg` for the packaging tests. Signing is not what those tests are about,
+# and generating a real key would make the offline suite slow and stateful, so
+# the signature files are stubs — written where the real thing would write them
+# so callers that check "did a signature get produced" still see one.
+
+set -uo pipefail
+
+out=""
+mode=""
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        --detach-sign) mode=detach; shift ;;
+        --clearsign)   mode=clear; shift ;;
+        --export)      mode=exportkey; shift ;;
+        --passphrase-fd) shift 2 ;;
+        -*) shift ;;
+        *)  args+=("$1"); shift ;;
+    esac
+done
+
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'gpg %s %s\n' "$mode" "$out" >> "$MOCK_CALL_LOG"
+
+case "$mode" in
+    detach) printf -- '-----BEGIN PGP SIGNATURE-----\nmock\n-----END PGP SIGNATURE-----\n' > "$out" ;;
+    clear)
+        # A clearsigned file has to contain the signed text: the rebuild script
+        # publishes InRelease as the index apt actually reads.
+        { printf -- '-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n'
+          cat "${args[0]}"
+          printf -- '-----BEGIN PGP SIGNATURE-----\nmock\n-----END PGP SIGNATURE-----\n'
+        } > "$out"
+        ;;
+    exportkey) printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\nmock\n-----END PGP PUBLIC KEY BLOCK-----\n' ;;
+    *) : ;;
+esac
+exit 0
