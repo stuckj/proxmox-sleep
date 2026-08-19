@@ -68,7 +68,30 @@ sudo apt update
 sudo apt install proxmox-sleep
 ```
 
+This repository carries the **current release only**. To install or pin an older
+version, add the archive repository as well — it indexes every version ever
+published:
+
+```bash
+echo "deb [signed-by=/usr/share/keyrings/proxmox-sleep.gpg] https://github.com/stuckj/proxmox-sleep/releases/download/apt-history/ ./" | sudo tee /etc/apt/sources.list.d/proxmox-sleep-history.list
+
+sudo apt update
+apt list -a proxmox-sleep              # every published version
+sudo apt install proxmox-sleep=1.0.0   # pin one
+```
+
+Enabling both is safe. They are two *sources for the same package*, not two
+packages, so apt merges them and still installs exactly one `proxmox-sleep`.
+
 **RHEL/CentOS/Fedora (YUM/DNF):**
+
+Requires **rpm 4.16 or newer** — Fedora, and RHEL/Alma/Rocky 9 and 10. Packages
+are signed with an ed25519 key, and rpm only learned to read EdDSA signatures in
+4.16.0. EL8 ships rpm 4.14, which cannot import the key at all, so `gpgcheck=1`
+cannot be satisfied there.
+
+This repository indexes every version published; no separate archive repository
+is needed.
 
 ```bash
 # Add the repository
@@ -83,7 +106,12 @@ EOF
 
 # Install
 sudo dnf install proxmox-sleep
+sudo dnf install proxmox-sleep-1.0.0   # or pin an older version
 ```
+
+Every version other than the current one is served straight from the per-version
+[GitHub releases](https://github.com/stuckj/proxmox-sleep/releases) — the APT
+archive and the YUM repository hold indexes pointing at them rather than copies.
 
 After installation, configure the package:
 

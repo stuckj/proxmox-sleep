@@ -1780,6 +1780,622 @@ test_missing_config_file_is_a_config_error() {
     assert_contains "points at the example" "$out" "Configuration file not found"
 }
 
+# ── Packaging ─────────────────────────────────────────────────────────────────
+# The release pipeline signs each rpm and derives the apt/yum indexes from the
+# release assets. Both are checked here rather than only on a tag push, where a
+# mistake is published before anyone sees it.
+
+fixture() { python3 "$REPO_ROOT/tests/rpm-fixture.py" "$@"; }
+sigcheck() { python3 "$REPO_ROOT/scripts/check-rpm-signature.py" "$@" 2>&1; }
+xmlbase() { python3 "$REPO_ROOT/scripts/yum_xmlbase.py" "$@" 2>&1; }
+
+# A repodata directory holding one primary.xml.gz that locates one package.
+# <checksum> and <size> are deliberately wrong so the test can tell whether
+# yum_xmlbase.py recomputed them or passed them through.
+make_repodata() { # dir rpm-name [primary-type]
+    local dir="$1" rpm="$2" type="${3:-primary}"
+    mkdir -p "$dir"
+    python3 - "$dir" "$rpm" "$type" <<'PY'
+import gzip, sys
+d, rpm, typ = sys.argv[1], sys.argv[2], sys.argv[3]
+primary = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<metadata xmlns="http://linux.duke.edu/metadata/common" packages="1">\n'
+    '<package type="rpm"><name>proxmox-sleep</name>\n'
+    f'<location href="{rpm}"/>\n'
+    '<time file="1750000000" build="1750000000"/>\n'
+    '</package>\n</metadata>\n')
+open(f"{d}/aaa-primary.xml.gz", "wb").write(gzip.compress(primary.encode()))
+open(f"{d}/repomd.xml", "w").write(
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<repomd xmlns="http://linux.duke.edu/metadata/repo">\n'
+    '  <revision>1</revision>\n'
+    f'  <data type="{typ}">\n'
+    '    <checksum type="sha1">stale</checksum>\n'
+    '    <open-checksum type="sha1">stale</open-checksum>\n'
+    '    <location href="repodata/aaa-primary.xml.gz"/>\n'
+    '    <size>1</size>\n    <open-size>1</open-size>\n'
+    '  </data>\n</repomd>\n')
+PY
+}
+
+test_rpm_signature_unsigned_is_a_failure() {
+    # Carries the digests every rpm has and no signature. Reading either digest
+    # tag as a signature is the mistake this guards against.
+    fixture "$SANDBOX/pkg.rpm" --digests
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "unsigned rpm fails" "$rc" 1
+    assert_contains "names it unsigned" "$out" "UNSIGNED"
+}
+
+test_rpm_signature_eddsa_lands_in_tag_267() {
+    # An ed25519 signing key -- which this project uses -- produces a signature
+    # in DSAHEADER, not RSAHEADER.
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --digests
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "signed rpm passes" "$rc" 0
+    assert_contains "reads the EdDSA header signature" "$out" "DSAHEADER=EdDSA"
+}
+
+test_rpm_signature_rsa_tag_268_also_counts() {
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 268
+    local rc
+    sigcheck "$SANDBOX/pkg.rpm" >/dev/null; rc=$?
+    assert_rc "RSAHEADER counts as signed" "$rc" 0
+}
+
+test_rpm_signature_reads_the_nfpm_shape() {
+    # What the release workflow actually produces: nfpm signs with the same
+    # ed25519 key into RSAHEADER *and* PGP, not into DSAHEADER. Reading only the
+    # tag rpmsign uses would call every package the pipeline builds unsigned.
+    local key=aaaabbbbccccdddd
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 268 --sig-tag 1002 --issuer "$key" --digests
+    local out rc
+    out=$(sigcheck --key "$key" "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "the build path's shape reads as signed" "$rc" 0
+    assert_contains "the header signature is read" "$out" "RSAHEADER=EdDSA"
+    assert_contains "the header+payload signature is read" "$out" "PGP=EdDSA"
+}
+
+test_rpm_signature_requires_the_named_key() {
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --issuer aaaabbbbccccdddd
+    local out rc
+    out=$(sigcheck --key deadbeefdeadbeef "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "a signature by another key fails" "$rc" 1
+    assert_contains "says which key it wanted" "$out" "WRONG KEY"
+
+    out=$(sigcheck --key aaaabbbbccccdddd "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "the right key passes" "$rc" 0
+}
+
+test_rpm_signature_tag_alone_is_not_proof() {
+    # The signature tag is present and holds a well-formed OpenPGP packet that
+    # is not a signature. Treating the tag's presence as proof would pass this.
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --not-a-sig --digests
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "a non-signature packet does not count" "$rc" 1
+    assert_contains "names it unsigned" "$out" "UNSIGNED"
+}
+
+test_rpm_signature_truncated_file_is_a_failure() {
+    fixture "$SANDBOX/pkg.rpm" --truncate
+    local out rc
+    out=$(sigcheck "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "a truncated rpm fails" "$rc" 1
+    assert_contains "does not call it signed" "$out" "UNREADABLE"
+}
+
+test_yum_xmlbase_points_packages_at_releases() {
+    local rpm="proxmox-sleep-1.1.0-1.noarch.rpm"
+    make_repodata "$SANDBOX/in" "$rpm"
+    printf 'v1.1.0/%s\n' "$rpm" > "$SANDBOX/assetmap"
+    local rc
+    xmlbase "$SANDBOX/in" "$SANDBOX/out" "$SANDBOX/assetmap" "https://ex.test/dl" >/dev/null
+    rc=$?
+    assert_rc "rewrite succeeds" "$rc" 0
+
+    local primary
+    primary=$(gzip -dc "$SANDBOX"/out/*-primary.xml.gz)
+    assert_contains "package points at its release" "$primary" \
+        'xml:base="https://ex.test/dl/v1.1.0/"'
+    assert_contains "href is the bare asset name" "$primary" "href=\"$rpm\""
+
+    # The digest and size in repomd.xml must describe the file actually written,
+    # or every dnf client rejects the repository. The input seeds them with
+    # "stale" and 1, so anything left unrecomputed is visible.
+    local name sha size repomd
+    name=$(basename "$(echo "$SANDBOX"/out/*-primary.xml.gz)")
+    sha=$(sha256sum "$SANDBOX/out/$name" | awk '{print $1}')
+    size=$(stat -c%s "$SANDBOX/out/$name")
+    repomd=$(cat "$SANDBOX/out/repomd.xml")
+    assert_not_contains "no seeded digest survives" "$repomd" "stale"
+    assert_contains "repomd names the rewritten file" "$repomd" "repodata/$name"
+    # Value and type together: a sha256 digest still labelled sha1 is rejected
+    # by every client, and either half alone would pass on the other's evidence.
+    assert_contains "the digest is recorded as the sha256 it is" "$repomd" \
+        "<checksum type=\"sha256\">$sha</checksum>"
+    assert_contains "repomd carries its real size" "$repomd" "<size>$size</size>"
+    assert_eq "the filename is the digest" "${name%%-primary.xml.gz}" "$sha"
+}
+
+test_yum_xmlbase_refuses_an_unhandled_metadata_type() {
+    # primary_db also carries package locations; copying it through unmodified
+    # would advertise the pre-migration paths to any client that prefers it.
+    make_repodata "$SANDBOX/in" "proxmox-sleep-1.1.0-1.noarch.rpm" primary_db
+    : > "$SANDBOX/assetmap"
+    local out rc
+    out=$(xmlbase "$SANDBOX/in" "$SANDBOX/out" "$SANDBOX/assetmap" "https://ex.test/dl"); rc=$?
+    assert_rc "refuses rather than passing it through" "$rc" 1
+    assert_contains "says why" "$out" "unexpected repodata type"
+}
+
+test_yum_xmlbase_fails_when_no_release_holds_a_package() {
+    make_repodata "$SANDBOX/in" "proxmox-sleep-9.9.9-1.noarch.rpm"
+    printf 'v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm\n' > "$SANDBOX/assetmap"
+    local out rc
+    out=$(xmlbase "$SANDBOX/in" "$SANDBOX/out" "$SANDBOX/assetmap" "https://ex.test/dl"); rc=$?
+    assert_rc "an unlocatable package is fatal" "$rc" 1
+    assert_contains "names the package" "$out" "proxmox-sleep-9.9.9-1.noarch.rpm"
+}
+
+# The release scripts talk to GitHub and to gpg; `mocks/pkg` stands in for both,
+# plus rpmsign. Added to PATH only by the tests that need it.
+with_pkg_mocks() {
+    export PATH="$MOCKS/pkg:$PATH"
+    export MOCK_ASSET_DIR="$SANDBOX/assets"
+    export MOCK_RELEASES_TSV="$SANDBOX/releases.tsv"
+    export HOME="$SANDBOX/home"
+    unset XDG_CONFIG_HOME
+    mkdir -p "$HOME" "$MOCK_ASSET_DIR"
+}
+
+# The listing the gh mock serves. The two scripts pass different jq filters, so
+# they get different shapes out of the same API call and the mock has to be fed
+# the one its caller expects:
+#   joined  "<tag>/<name>\t<size>\t<url>"          rebuild-package-repos.sh
+#   split   "<tag>\t<name>\t<size>\t<url>"         resign-release-rpms.sh
+write_releases_tsv() { # <joined|split>
+    local shape="$1" f tag name
+    : > "$MOCK_RELEASES_TSV"
+    while IFS= read -r f; do
+        tag=$(basename "$(dirname "$f")")
+        name=$(basename "$f")
+        if [[ "$shape" == joined ]]; then
+            printf '%s/%s\t%s\thttps://fake/%s/%s\n' \
+                   "$tag" "$name" "$(stat -c%s "$f")" "$tag" "$name" >> "$MOCK_RELEASES_TSV"
+        else
+            printf '%s\t%s\t%s\thttps://fake/%s/%s\n' \
+                   "$tag" "$name" "$(stat -c%s "$f")" "$tag" "$name" >> "$MOCK_RELEASES_TSV"
+        fi
+    done < <(find "$MOCK_ASSET_DIR" \( -name '*.rpm' -o -name '*.deb' \) | LC_ALL=C sort)
+}
+
+# A real .deb, because the rebuild script reads its version with dpkg-deb.
+make_deb() { # <tag> <version>
+    local tag="$1" v="$2" root="$SANDBOX/debbuild/$2"
+    mkdir -p "$root/DEBIAN" "$MOCK_ASSET_DIR/$tag"
+    { echo "Package: proxmox-sleep"; echo "Version: $v"; echo "Architecture: all"
+      echo "Maintainer: test <test@example.invalid>"; echo "Description: test"
+    } > "$root/DEBIAN/control"
+    dpkg-deb --build --root-owner-group "$root" \
+             "$MOCK_ASSET_DIR/$tag/proxmox-sleep_${v}_all.deb" >/dev/null
+}
+
+test_resign_backup_survives_a_resumed_run() {
+    # A run that dies between the delete and the upload leaves one release
+    # without its package and others already replaced. The recovery path has to
+    # survive being re-run: the manifest must keep the row for the package that
+    # is now missing -- it exists nowhere else -- and the backed-up original
+    # must not be overwritten by the signed bytes now being served.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm two=proxmox-sleep-1.1.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$MOCK_ASSET_DIR/v1.1.0"
+    # Signed by the key the run is given, so the sign loop skips both and this
+    # exercises the backup alone.
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    fixture "$MOCK_ASSET_DIR/v1.1.0/$two" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the first run succeeds" "$rc" 0
+    assert_eq "both packages are backed up" "$(wc -l < "$W/backup/manifest.tsv")" "2"
+    local orig
+    orig=$(sha256sum "$W/backup/v1.0.0/$one" | awk '{print $1}')
+
+    # v1.0.0 now serves re-signed bytes; v1.1.0's asset was deleted by an upload
+    # that never landed.
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key"
+    rm -f "$MOCK_ASSET_DIR/v1.1.0/$two"
+    write_releases_tsv split
+
+    out=$(GPG_KEY_ID="$key" ENUM_RETRY_DELAY=0 \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the second run refuses to report success" "$rc" 1
+    assert_contains "it names the missing package" "$out" "v1.1.0/$two"
+    assert_contains "and gives the restore command" "$out" "RESTORE=1 PUBLISH=1"
+
+    assert_eq "the manifest still covers both" "$(wc -l < "$W/backup/manifest.tsv")" "2"
+    assert_contains "including the one no longer on its release" \
+        "$(cat "$W/backup/manifest.tsv")" "v1.1.0"
+    assert_eq "the backed-up original was not overwritten" \
+        "$(sha256sum "$W/backup/v1.0.0/$one" | awk '{print $1}')" "$orig"
+    if [[ ! -f "$W/backup/v1.1.0/$two" ]]; then
+        fail_assert "the deleted package's only remaining copy was removed"
+    fi
+}
+
+test_resign_narrowed_run_does_not_cry_missing() {
+    # ONLY_TAGS narrows the work list, not the world. Judging "backed up but not
+    # enumerated" against the narrowed listing makes every excluded release look
+    # like a package a failed upload deleted — and the recovery that would be
+    # printed for it replaces a correctly signed asset with the unsigned original.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm two=proxmox-sleep-1.1.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$MOCK_ASSET_DIR/v1.1.0"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    fixture "$MOCK_ASSET_DIR/v1.1.0/$two" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the full run succeeds" "$rc" 0
+
+    out=$(GPG_KEY_ID="$key" ONLY_TAGS=v1.1.0 \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the narrowed re-run succeeds" "$rc" 0
+    assert_not_contains "the excluded release is not called missing" \
+        "$out" "MISSING FROM THEIR RELEASE"
+    assert_not_contains "and no restore of it is suggested" "$out" "ONLY_TAGS='v1.0.0'"
+    assert_eq "the manifest still covers both" "$(wc -l < "$W/backup/manifest.tsv")" "2"
+}
+
+test_resign_restore_rejects_a_tag_it_cannot_serve() {
+    # A typo alongside a good tag would otherwise restore the good one, report
+    # success, and leave the release the operator was recovering still missing.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+    GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" >/dev/null 2>&1
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" RESTORE=1 ONLY_TAGS="v1.0.0 v9.9.9" \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "an unserviceable tag is fatal" "$rc" 1
+    assert_contains "and it names the tag" "$out" "v9.9.9"
+}
+
+test_resign_skips_what_is_already_published_signed() {
+    # After a part-finished run, a release already replaced serves signed bytes
+    # while the backup still holds the unsigned original. The skip test has to
+    # ask the published package: asking the backup would re-sign and re-upload
+    # every release the previous run had already done.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd name=proxmox-sleep-1.0.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0" "$W/backup/v1.0.0"
+    : > "$W/.resign-marker"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$name" --sig-tag 267 --issuer "$key" --digests
+    fixture "$W/backup/v1.0.0/$name" --digests
+    printf '%s\t%s\t%s\t%s\n' v1.0.0 "$name" \
+           "$(stat -c%s "$W/backup/v1.0.0/$name")" \
+           "$(sha256sum "$W/backup/v1.0.0/$name" | awk '{print $1}')" > "$W/backup/manifest.tsv"
+    write_releases_tsv split
+
+    local out rc
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "the run succeeds with nothing to do" "$rc" 0
+    assert_contains "it reports the package as already signed" "$out" "already signed by"
+    # The call log, not the output: the rpmsign mock signs rather than shouting,
+    # so its absence has to be read from what was invoked.
+    assert_not_contains "rpmsign was never invoked" "$(calls)" "rpmsign"
+}
+
+test_rebuild_apt_shrink_is_compared_by_name() {
+    # One version leaves the releases and another arrives in the same run, so
+    # the entry count is unchanged. Comparing totals sees nothing wrong and
+    # publishes an index that has silently dropped a version.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    make_deb v1.2.0 1.2.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    fixture "$MOCK_ASSET_DIR/v1.2.0/proxmox-sleep-1.2.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    # The published index still lists 1.0.0, which no release holds any more.
+    mkdir -p "$MOCK_ASSET_DIR/apt-history"
+    { echo "Package: proxmox-sleep"; echo "Version: 1.0.0"
+      echo "Filename: ../v1.0.0/proxmox-sleep_1.0.0_all.deb"; echo ""
+      echo "Package: proxmox-sleep"; echo "Version: 1.1.0"
+      echo "Filename: ../v1.1.0/proxmox-sleep_1.1.0_all.deb"; echo ""
+    } > "$MOCK_ASSET_DIR/apt-history/Packages"
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "it refuses to publish" "$rc" 1
+    assert_contains "it names the version that would be dropped" "$out" \
+        "proxmox-sleep_1.0.0_all.deb"
+    assert_contains "and says the index lost it" "$out" "apt-history has lost"
+
+    # The same run is allowed through when the loss is deliberate.
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages ALLOW_SHRINK=1 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1)
+    assert_not_contains "ALLOW_SHRINK=1 suppresses the refusal" "$out" "apt-history has lost"
+    # Positive marker from past the guard: absence alone would also hold if the
+    # run had died before reaching it.
+    assert_contains "and the run carried on past the guard" "$out" "stable: pinned at"
+}
+
+test_resign_refuses_a_backup_it_cannot_vouch_for() {
+    # A manifest row whose file is gone or altered must not be re-derived from
+    # the release: after a replacement the release serves the signed bytes, and
+    # recording those as the original leaves every later check comparing the
+    # manifest against itself.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+    GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" >/dev/null 2>&1
+
+    local out rc
+    printf 'tampered' > "$W/backup/v1.0.0/$one"
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "an altered backup is fatal" "$rc" 1
+    assert_contains "and it says which file" "$out" "$one"
+
+    rm -f "$W/backup/v1.0.0/$one"
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "a missing backup is fatal" "$rc" 1
+    assert_contains "rather than silently re-fetching it" "$out" "is gone"
+}
+
+test_resign_rejects_an_unrecognised_flag_value() {
+    # RESTORE selects what the run does, so folding an unrecognised value to a
+    # default would turn "put the originals back" into "publish".
+    local out rc
+    out=$(GPG_KEY_ID=dummy RESTORE=true \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$SANDBOX/w" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "and names the flag" "$out" "RESTORE must be 0 or 1"
+}
+
+test_rebuild_yum_index_points_at_the_releases() {
+    # The whole pipeline, not yum_xmlbase.py alone: the assetmap, base URL and
+    # signing have to be wired to it correctly, and a wrong yum index breaks
+    # every dnf client.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages EXPECT_TAG=v1.1.0 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "the rebuild completes" "$rc" 0
+    assert_contains "the release is confirmed in both indexes" "$out" \
+        "confirmed v1.1.0 is in both"
+
+    local primary repomd
+    primary=$(gzip -dc "$W"/pages/yum/repodata/*primary.xml.gz)
+    assert_contains "the package points at its release" "$primary" \
+        'xml:base="https://fake/v1.1.0/"'
+    assert_contains "by bare asset name" "$primary" 'href="proxmox-sleep-1.1.0-1.noarch.rpm"'
+    assert_not_contains "and not at a path under the repository" "$primary" 'href="packages/'
+
+    # Everything repomd.xml names must exist and match, or dnf rejects the repo.
+    repomd=$(cat "$W/pages/yum/repodata/repomd.xml")
+    local href sha
+    while IFS= read -r href; do
+        [[ -f "$W/pages/yum/$href" ]] || fail_assert "repomd names a missing file: $href"
+        sha=$(sha256sum "$W/pages/yum/$href" | awk '{print $1}')
+        assert_contains "the digest for $href matches the file" "$repomd" "$sha"
+    done < <(printf '%s\n' "$repomd" | sed -n 's|.*<location href="\(repodata/[^"]*\)".*|\1|p')
+
+    if [[ ! -f "$W/pages/yum/repodata/repomd.xml.asc" ]]; then
+        fail_assert "the repodata was not signed"
+    fi
+}
+
+# A published YUM index the curl mock will serve, listing the given package
+# names under the pre-migration packages/ prefix.
+publish_yum_index() { # <name>...
+    mkdir -p "$MOCK_ASSET_DIR/yum/repodata"
+    python3 - "$MOCK_ASSET_DIR/yum/repodata" "$@" <<'PY'
+import gzip, hashlib, os, sys
+out, names = sys.argv[1], sys.argv[2:]
+pkgs = "".join(f'<package type="rpm"><location href="packages/{n}"/></package>\n'
+               for n in names)
+body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<metadata xmlns="http://linux.duke.edu/metadata/common" packages="{len(names)}">\n'
+        f'{pkgs}</metadata>\n').encode()
+gz = gzip.compress(body, mtime=0)
+name = f"{hashlib.sha256(gz).hexdigest()}-primary.xml.gz"
+open(os.path.join(out, name), "wb").write(gz)
+open(os.path.join(out, "repomd.xml"), "w").write(
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<repomd xmlns="http://linux.duke.edu/metadata/repo">\n'
+    f'  <data type="primary"><location href="repodata/{name}"/></data>\n'
+    '</repomd>\n')
+PY
+}
+
+test_rebuild_yum_shrink_names_what_went_missing() {
+    # The published index is the comparison point, so this is the branch that
+    # runs whenever anything is already published — every other pkg/ test hits
+    # the 404 "nothing published yet" path instead.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+    publish_yum_index proxmox-sleep-1.0.0-1.noarch.rpm proxmox-sleep-1.1.0-1.noarch.rpm
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "it refuses to publish" "$rc" 1
+    assert_contains "it reads the published count" "$out" "currently published: 2"
+    assert_contains "it names the package that would be dropped" "$out" \
+        "proxmox-sleep-1.0.0-1.noarch.rpm"
+    assert_contains "and says the index lost it" "$out" "yum has lost"
+
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages ALLOW_SHRINK=1 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1); rc=$?
+    assert_rc "ALLOW_SHRINK=1 lets a deliberate deletion through" "$rc" 0
+    assert_not_contains "with no refusal" "$out" "yum has lost"
+}
+
+test_rebuild_publishes_index_and_signature_together() {
+    # The publish half, which the dry-run tests never reach. --clobber deletes
+    # before it writes, so an upload that fails after the index has landed but
+    # before its signature leaves every client with a hash mismatch.
+    local W="$SANDBOX/rb" remote="$SANDBOX/ghp.git"
+    with_pkg_mocks
+    git init -q --bare "$remote"
+    # Two versions, so the index carries more than one stanza and their order
+    # has to be pinned for a rebuild to be reproducible.
+    make_deb v1.0.0 1.0.0
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.0.0/proxmox-sleep-1.0.0-1.noarch.rpm" --digests
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages PAGES_REMOTE="$remote" DRY_RUN=0 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "the publish succeeds" "$rc" 0
+
+    # Both halves of the archive must be present, or apt cannot verify it.
+    local f
+    for f in Packages Packages.gz Release Release.gpg InRelease gpg-key.asc; do
+        if [[ ! -f "$MOCK_ASSET_DIR/apt-history/$f" ]]; then
+            fail_assert "apt-history is missing $f"
+        fi
+    done
+    assert_contains "the published index lists the release" \
+        "$(cat "$MOCK_ASSET_DIR/apt-history/Packages")" "Filename: ../v1.1.0/"
+
+    # gh-pages is committed on top rather than force-pushed.
+    assert_contains "gh-pages carries the yum repodata" \
+        "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages)" "yum/repodata/repomd.xml"
+    assert_contains "and the current deb" \
+        "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages)" \
+        "apt/pool/main/proxmox-sleep_1.1.0_all.deb"
+
+    # Re-running converges rather than accumulating. Not byte-identical overall:
+    # each Release carries a fresh Date. What must not move is the index that
+    # names the packages, and the set of files on the branch.
+    local index_before tree_before index_after tree_after
+    index_before=$(sha256sum "$MOCK_ASSET_DIR/apt-history/Packages" | awk '{print $1}')
+    tree_before=$(git --git-dir="$remote" ls-tree -r --name-only gh-pages | LC_ALL=C sort)
+
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages PAGES_REMOTE="$remote" DRY_RUN=0 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1); rc=$?
+    assert_rc "the second run succeeds" "$rc" 0
+    index_after=$(sha256sum "$MOCK_ASSET_DIR/apt-history/Packages" | awk '{print $1}')
+    tree_after=$(git --git-dir="$remote" ls-tree -r --name-only gh-pages | LC_ALL=C sort)
+    assert_eq "the published index is unchanged" "$index_after" "$index_before"
+    assert_eq "and so is the set of files on gh-pages" "$tree_after" "$tree_before"
+}
+
+test_rebuild_retries_a_failed_index_upload() {
+    # Without a retry the archive is left serving an index whose digest is not
+    # the one in its published Release.
+    local W="$SANDBOX/rb" remote="$SANDBOX/ghp.git"
+    with_pkg_mocks
+    git init -q --bare "$remote"
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc calls
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages PAGES_REMOTE="$remote" DRY_RUN=0 \
+          MOCK_UPLOAD_FAIL_TAGS=apt-history UPLOAD_BACKOFF="0 0 0" \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "a failed upload is fatal" "$rc" 1
+    calls=$(grep -c 'gh release upload' "$MOCK_CALL_LOG" || true)
+    if [[ "$calls" -lt 2 ]]; then
+        fail_assert "the upload was not retried (attempts: $calls)"
+    fi
+    assert_not_contains "and gh-pages was not published over the failure" \
+        "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages 2>&1)" "repomd.xml"
+}
+
+test_rebuild_refuses_a_truncated_download() {
+    # curl reports success for a transfer that stopped early, so the size check
+    # against the release metadata is the only thing between a short file and an
+    # index published with the hash of bytes nobody will receive.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages \
+          MOCK_TRUNCATE_ASSETS=proxmox-sleep_1.1.0_all.deb \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "it refuses to build from a short file" "$rc" 1
+    assert_contains "and names the asset" "$out" "proxmox-sleep_1.1.0_all.deb"
+    assert_contains "as truncated" "$out" "truncated"
+}
+
+test_rebuild_refuses_a_work_dir_inside_a_checkout() {
+    # The work directory is wiped, so a path inside a checkout would delete
+    # tracked files.
+    local out rc
+    out=$(GPG_KEY_ID=dummy bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" \
+              "$REPO_ROOT/scratch-should-not-exist" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "says why" "$out" "inside a git working tree"
+    if [[ -e "$REPO_ROOT/scratch-should-not-exist" ]]; then
+        fail_assert "the guard ran only after creating the directory"
+        rm -rf "$REPO_ROOT/scratch-should-not-exist"
+    fi
+}
+
+test_rebuild_refuses_a_directory_it_did_not_create() {
+    mkdir -p "$SANDBOX/notmine"
+    : > "$SANDBOX/notmine/precious"
+    local out rc
+    out=$(GPG_KEY_ID=dummy bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" \
+              "$SANDBOX/notmine" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "says why" "$out" "refusing to wipe non-empty"
+    [[ -f "$SANDBOX/notmine/precious" ]] || fail_assert "the directory was wiped anyway"
+}
+
+test_resign_refuses_a_work_dir_with_whitespace() {
+    # The path is interpolated into an rpm macro that rpm re-splits on
+    # whitespace, so a space there breaks signing in a confusing way.
+    local out rc
+    out=$(GPG_KEY_ID=dummy bash "$REPO_ROOT/scripts/resign-release-rpms.sh" \
+              "$SANDBOX/has a space" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "says why" "$out" "contains whitespace"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 echo ""
@@ -1894,6 +2510,32 @@ run_test "config/bad-sleep-action"               test_bad_sleep_action_is_a_conf
 run_test "config/invalid-action-in-status"       test_invalid_sleep_action_flagged_in_status
 run_test "config/threshold-zero-disables"        test_zero_idle_threshold_status_reports_disabled
 run_test "config/missing-file"                   test_missing_config_file_is_a_config_error
+
+run_test "pkg/sig-unsigned-fails"                test_rpm_signature_unsigned_is_a_failure
+run_test "pkg/sig-eddsa-tag-267"                 test_rpm_signature_eddsa_lands_in_tag_267
+run_test "pkg/sig-rsa-tag-268"                   test_rpm_signature_rsa_tag_268_also_counts
+run_test "pkg/sig-nfpm-shape"                    test_rpm_signature_reads_the_nfpm_shape
+run_test "pkg/sig-requires-named-key"            test_rpm_signature_requires_the_named_key
+run_test "pkg/sig-tag-alone-not-proof"           test_rpm_signature_tag_alone_is_not_proof
+run_test "pkg/sig-truncated-fails"               test_rpm_signature_truncated_file_is_a_failure
+run_test "pkg/xmlbase-points-at-releases"        test_yum_xmlbase_points_packages_at_releases
+run_test "pkg/xmlbase-refuses-unknown-type"      test_yum_xmlbase_refuses_an_unhandled_metadata_type
+run_test "pkg/xmlbase-unlocatable-package"       test_yum_xmlbase_fails_when_no_release_holds_a_package
+run_test "pkg/resign-backup-survives-resume"     test_resign_backup_survives_a_resumed_run
+run_test "pkg/resign-narrowed-run-ok"            test_resign_narrowed_run_does_not_cry_missing
+run_test "pkg/resign-restore-bad-tag"            test_resign_restore_rejects_a_tag_it_cannot_serve
+run_test "pkg/resign-skips-already-signed"       test_resign_skips_what_is_already_published_signed
+run_test "pkg/rebuild-apt-shrink-by-name"        test_rebuild_apt_shrink_is_compared_by_name
+run_test "pkg/resign-broken-backup"              test_resign_refuses_a_backup_it_cannot_vouch_for
+run_test "pkg/resign-bad-flag-value"             test_resign_rejects_an_unrecognised_flag_value
+run_test "pkg/rebuild-yum-points-at-releases"    test_rebuild_yum_index_points_at_the_releases
+run_test "pkg/rebuild-yum-shrink-names"          test_rebuild_yum_shrink_names_what_went_missing
+run_test "pkg/rebuild-publishes-both-halves"     test_rebuild_publishes_index_and_signature_together
+run_test "pkg/rebuild-retries-upload"            test_rebuild_retries_a_failed_index_upload
+run_test "pkg/rebuild-truncated-download"        test_rebuild_refuses_a_truncated_download
+run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout
+run_test "pkg/rebuild-refuses-foreign-dir"       test_rebuild_refuses_a_directory_it_did_not_create
+run_test "pkg/resign-refuses-whitespace"         test_resign_refuses_a_work_dir_with_whitespace
 
 echo ""
 echo "-------------------------------------------"

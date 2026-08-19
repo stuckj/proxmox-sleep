@@ -365,7 +365,7 @@ bash -n proxmox-sleep-manager.sh
 bash -n proxmox-idle-monitor.sh
 
 # Run shellcheck
-shellcheck -x *.sh
+shellcheck -x *.sh scripts/*.sh
 
 # Test idle check (single iteration)
 ./proxmox-idle-monitor.sh check
@@ -396,9 +396,9 @@ git tag -a v1.1.0 -m "Release v1.1.0"
 git push origin v1.1.0
 
 # 3. GitHub Actions automatically:
-#    - Builds deb/rpm packages
+#    - Builds deb/rpm packages, signing the rpm and failing if it came out unsigned
 #    - Creates GitHub Release
-#    - Updates package repositories
+#    - Rebuilds the APT and YUM indexes from the release assets
 ```
 
 ---

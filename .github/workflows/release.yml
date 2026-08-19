@@ -36,13 +36,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nfpm
 
+      # Written outside the workspace so it cannot be picked up by a later step
+      # that globs the checkout, and 600 so nfpm is the only reader.
+      - name: Stage the rpm signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          install -m 600 /dev/null "${RUNNER_TEMP}/rpm-signing-key.asc"
+          printf '%s\n' "$GPG_PRIVATE_KEY" > "${RUNNER_TEMP}/rpm-signing-key.asc"
+          # The key ids that count as ours when checking the signature below.
+          # gpg signs with a signing subkey when the key has one, so the id on
+          # the signature is not necessarily the primary's.
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "SIGNING_KEY_IDS=$(gpg --list-secret-keys --keyid-format LONG --with-colons \
+                | awk -F: '/^(sec|ssb):/ {print $5}' | paste -sd,)" >> "$GITHUB_ENV"
+
       - name: Build deb package
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager deb --target .
 
       - name: Build rpm package
+        env:
+          RPM_SIGNING_KEY_FILE: ${{ runner.temp }}/rpm-signing-key.asc
+          NFPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           VERSION=${{ steps.version.outputs.VERSION }} nfpm package --packager rpm --target .
+
+      # nfpm builds an unsigned rpm and exits 0 when the key file path is empty,
+      # so a signing step that silently did nothing looks exactly like success.
+      # Every documented dnf install uses gpgcheck=1, which an unsigned package
+      # cannot satisfy.
+      - name: Assert the rpm is signed
+        run: python3 scripts/check-rpm-signature.py --key "$SIGNING_KEY_IDS" ./*.rpm
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/rpm-signing-key.asc"
 
       - name: List built packages
         run: ls -la *.deb *.rpm
@@ -69,27 +98,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # The repositories are rebuilt from the release assets, so this needs the
+  # release to exist. A workflow_dispatch build has no release to serve from and
+  # publishes nothing.
   publish-repo:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # Scoped to this job, not the workflow: only one pending run is kept per
+    # concurrency group, so covering `build` too would let a third tag pushed in
+    # quick succession cancel the second one's build and leave that release with
+    # no packages attached at all. A cancelled publish is self-healing -- the
+    # next one rebuilds from every release asset -- while a cancelled build is
+    # not.
+    #
+    # Two runs replacing the same apt-history assets at once can leave a signed
+    # InRelease from one beside a Packages.gz from the other, which fails apt
+    # update for everyone until the next successful run. Queued rather than
+    # cancelled: a half-finished publish is worse than a delayed one.
+    concurrency:
+      group: package-repositories
+      cancel-in-progress: false
+    timeout-minutes: 60
     steps:
-      - name: Checkout gh-pages branch
-        id: checkout-gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          path: gh-pages
-          fetch-depth: 0
-        continue-on-error: true
-
-      - name: Initialize gh-pages if needed
-        if: steps.checkout-gh-pages.outcome == 'failure'
-        run: |
-          mkdir -p gh-pages
-          cd gh-pages
-          git init
-          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git checkout -b gh-pages
+      - uses: actions/checkout@v4
 
       - name: Install tools
         run: |
@@ -98,166 +130,19 @@ jobs:
 
       - name: Import GPG key
         run: |
-          # Import the key
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-          KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
-          echo "GPG_KEY_ID=$KEY_ID" >> $GITHUB_ENV
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG --with-colons \
+                | awk -F: '/^sec:/ {print $5; exit}')" >> "$GITHUB_ENV"
 
-          # Configure GPG for non-interactive use
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           echo "use-agent" >> ~/.gnupg/gpg.conf
           echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
           gpgconf --kill gpg-agent
 
-      - name: Download deb package
-        uses: actions/download-artifact@v4
-        with:
-          name: deb-package
-          path: packages/
-
-      - name: Download rpm package
-        uses: actions/download-artifact@v4
-        with:
-          name: rpm-package
-          path: packages/
-
-      - name: Setup APT repository structure
-        run: |
-          cd gh-pages
-
-          # Create directory structure
-          mkdir -p apt/pool/main
-          mkdir -p apt/dists/stable/main/binary-all
-          mkdir -p apt/dists/stable/main/binary-amd64
-          mkdir -p apt/dists/stable/main/binary-arm64
-
-          # Copy deb package to pool
-          cp ../packages/*.deb apt/pool/main/
-
-          # Generate Packages file for binary-all (where our arch-independent package lives)
-          cd apt
-          dpkg-scanpackages --arch all pool/ > dists/stable/main/binary-all/Packages
-          gzip -k -f dists/stable/main/binary-all/Packages
-
-          # Create empty Packages files for other architectures (prevents apt warnings)
-          touch dists/stable/main/binary-amd64/Packages
-          gzip -k -f dists/stable/main/binary-amd64/Packages
-          touch dists/stable/main/binary-arm64/Packages
-          gzip -k -f dists/stable/main/binary-arm64/Packages
-
-          # Create Release file
-          cd dists/stable
-          echo "Origin: proxmox-sleep" > Release
-          echo "Label: proxmox-sleep" >> Release
-          echo "Suite: stable" >> Release
-          echo "Codename: stable" >> Release
-          echo "Architectures: amd64 arm64 all" >> Release
-          echo "Components: main" >> Release
-          echo "Description: Proxmox Sleep Manager packages" >> Release
-          echo "Date: $(date -Ru)" >> Release
-
-          # Add checksums to Release file
-          echo "SHA256:" >> Release
-          for f in main/binary-all/Packages main/binary-all/Packages.gz \
-                   main/binary-amd64/Packages main/binary-amd64/Packages.gz \
-                   main/binary-arm64/Packages main/binary-arm64/Packages.gz; do
-            if [[ -f "$f" ]]; then
-              SIZE=$(stat -c%s "$f")
-              SHA=$(sha256sum "$f" | awk '{print $1}')
-              echo " $SHA $SIZE $f" >> Release
-            fi
-          done
-
-          # Sign the Release file
-          echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --armor --passphrase-fd 0 --detach-sign -o Release.gpg Release
-          echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --armor --passphrase-fd 0 --clearsign -o InRelease Release
-
-      - name: Setup YUM repository structure
-        run: |
-          cd gh-pages
-
-          # Create directory structure
-          mkdir -p yum/packages
-
-          # Copy rpm package
-          cp ../packages/*.rpm yum/packages/
-
-          # Generate repository metadata
-          cd yum
-          createrepo_c .
-
-          # Sign the repository metadata
-          echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --armor --passphrase-fd 0 --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
-
-      - name: Export GPG public key
-        run: |
-          cd gh-pages
-          gpg --armor --export ${{ env.GPG_KEY_ID }} > gpg-key.asc
-          cp gpg-key.asc apt/
-          cp gpg-key.asc yum/
-
-      - name: Create index page
-        run: |
-          cat > gh-pages/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Proxmox Sleep Manager - Package Repository</title>
-            <style>
-              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
-              pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
-              code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
-              h1 { border-bottom: 2px solid #333; padding-bottom: 10px; }
-              h2 { margin-top: 30px; }
-            </style>
-          </head>
-          <body>
-            <h1>Proxmox Sleep Manager</h1>
-            <p>Automated power management for Proxmox hosts with Windows VMs and GPU passthrough.</p>
-
-            <h2>Debian/Ubuntu/Proxmox (APT)</h2>
-            <pre>
-          # Add the GPG key
-          curl -fsSL https://stuckj.github.io/proxmox-sleep/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/proxmox-sleep.gpg
-
-          # Add the repository
-          echo "deb [signed-by=/usr/share/keyrings/proxmox-sleep.gpg] https://stuckj.github.io/proxmox-sleep/apt stable main" | sudo tee /etc/apt/sources.list.d/proxmox-sleep.list
-
-          # Install
-          sudo apt update
-          sudo apt install proxmox-sleep</pre>
-
-            <h2>RHEL/CentOS/Fedora (YUM/DNF)</h2>
-            <pre>
-          # Add the repository
-          sudo tee /etc/yum.repos.d/proxmox-sleep.repo << 'REPO'
-          [proxmox-sleep]
-          name=Proxmox Sleep Manager
-          baseurl=https://stuckj.github.io/proxmox-sleep/yum
-          enabled=1
-          gpgcheck=1
-          gpgkey=https://stuckj.github.io/proxmox-sleep/yum/gpg-key.asc
-          REPO
-
-          # Install
-          sudo dnf install proxmox-sleep</pre>
-
-            <h2>Links</h2>
-            <ul>
-              <li><a href="https://github.com/stuckj/proxmox-sleep">GitHub Repository</a></li>
-              <li><a href="https://github.com/stuckj/proxmox-sleep/releases">Release Downloads</a></li>
-            </ul>
-          </body>
-          </html>
-          EOF
-
-      - name: Commit and push to gh-pages
-        run: |
-          cd gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --staged --quiet || git commit -m "Update packages for ${{ github.ref_name }}"
-          git push origin gh-pages
+      - name: Rebuild the package repositories
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          DRY_RUN: '0'
+          EXPECT_TAG: ${{ github.ref_name }}
+        run: bash scripts/rebuild-package-repos.sh "${RUNNER_TEMP}/repobuild"
