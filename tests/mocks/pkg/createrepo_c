@@ -6,14 +6,37 @@ data types (primary, filelists, other), digest-prefixed filenames as
 --unique-md-filenames produces, and package hrefs relative to the repository
 root. Emitting only `primary` would leave the copy-through branch — the one that
 refuses an unrecognised type — unexercised.
+
+Compression follows the real tool rather than what the caller wants to read.
+createrepo_c 1.x defaults primary/filelists/other to zstd and only writes gzip
+when --general-compress-type says so, so a caller that forgets the flag gets
+zstd here too and fails the same way it would in CI. The zstd output is a stub —
+correct magic and extension, not real zstd — which is enough, because what is
+being checked is that the caller asked for gzip.
 """
 import gzip
 import hashlib
 import os
 import sys
 
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
-root = args[0] if args else "."
+argv = sys.argv[1:]
+compress = "zstd"
+positional = []
+i = 0
+while i < len(argv):
+    if argv[i] == "--general-compress-type":
+        compress = argv[i + 1].lower()
+        i += 2
+    elif argv[i].startswith("--general-compress-type="):
+        compress = argv[i].split("=", 1)[1].lower()
+        i += 1
+    elif argv[i].startswith("-"):
+        i += 1
+    else:
+        positional.append(argv[i])
+        i += 1
+
+root = positional[0] if positional else "."
 rpms = sorted(f for f in os.listdir(root) if f.endswith(".rpm"))
 out = os.path.join(root, "repodata")
 os.makedirs(out, exist_ok=True)
@@ -36,18 +59,23 @@ bodies = {
               f'<otherdata packages="{len(rpms)}"/>\n').encode(),
 }
 
+if compress in ("gz", "gzip"):
+    ext, pack = "gz", lambda b: gzip.compress(b, mtime=0)
+else:
+    ext, pack = compress, lambda b: b"\x28\xb5\x2f\xfd" + b
+
 entries = []
 for kind, body in bodies.items():
-    gz = gzip.compress(body, mtime=0)
-    name = f"{hashlib.sha256(gz).hexdigest()}-{kind}.xml.gz"
+    blob = pack(body)
+    name = f"{hashlib.sha256(blob).hexdigest()}-{kind}.xml.{ext}"
     with open(os.path.join(out, name), "wb") as fh:
-        fh.write(gz)
+        fh.write(blob)
     entries.append(
         f'  <data type="{kind}">\n'
-        f'    <checksum type="sha256">{hashlib.sha256(gz).hexdigest()}</checksum>\n'
+        f'    <checksum type="sha256">{hashlib.sha256(blob).hexdigest()}</checksum>\n'
         f'    <open-checksum type="sha256">{hashlib.sha256(body).hexdigest()}</open-checksum>\n'
         f'    <location href="repodata/{name}"/>\n'
-        f'    <size>{len(gz)}</size>\n    <open-size>{len(body)}</open-size>\n'
+        f'    <size>{len(blob)}</size>\n    <open-size>{len(body)}</open-size>\n'
         f'  </data>\n')
 
 with open(os.path.join(out, "repomd.xml"), "w") as fh:

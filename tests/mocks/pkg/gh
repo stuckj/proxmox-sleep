@@ -5,9 +5,16 @@
 #   gh api repos/<owner>/<repo>/releases ...   prints $MOCK_RELEASES_TSV, which
 #                                              holds the tag/name/size/url rows
 #                                              the real jq filter would produce
-#   gh release upload <tag> <file>...          records the call and succeeds,
-#                                              unless the tag is in
-#                                              $MOCK_UPLOAD_FAIL_TAGS
+#   gh release upload <tag> <file>...          stores each file under
+#                                              $MOCK_ASSET_DIR/<tag>/, so the
+#                                              curl mock serves it back and a
+#                                              caller can verify what landed
+#   gh release view|create <tag>               succeeds
+#
+# A tag named in $MOCK_UPLOAD_FAIL_TAGS deletes the assets it was asked to
+# replace and *then* fails, which is what --clobber does when the upload half of
+# a replacement is the half that breaks. Failing without deleting would model a
+# kinder API than the real one and hide the failure the retry exists for.
 #
 # Only what the release scripts actually call is implemented; anything else is
 # an error rather than a silent success, so a new call site is noticed.
@@ -29,11 +36,32 @@ case "${1:-}" in
         log "$@"
         case "$sub" in
             upload)
+                shift 3
+                files=()
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --repo) shift 2 ;;
+                        -*)     shift ;;
+                        *)      files+=("$1"); shift ;;
+                    esac
+                done
+                dest="${MOCK_ASSET_DIR:-/nonexistent}/$tag"
+                mkdir -p "$dest"
+                fail=0
                 for t in ${MOCK_UPLOAD_FAIL_TAGS:-}; do
-                    if [[ "$t" == "$tag" ]]; then
-                        echo "mock: upload refused for $tag" >&2
-                        exit 1
-                    fi
+                    [[ "$t" == "$tag" ]] && fail=1
+                done
+                # --clobber removes the existing asset before writing the new
+                # one, so the delete happens whether or not the upload does.
+                for f in "${files[@]}"; do
+                    rm -f "$dest/$(basename "$f")"
+                done
+                if [[ "$fail" == 1 ]]; then
+                    echo "mock: upload refused for $tag" >&2
+                    exit 1
+                fi
+                for f in "${files[@]}"; do
+                    cp -- "$f" "$dest/$(basename "$f")"
                 done
                 exit 0
                 ;;

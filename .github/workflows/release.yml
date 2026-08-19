@@ -13,14 +13,6 @@ on:
 permissions:
   contents: write
 
-# Two runs replacing the same apt-history assets at once can leave a signed
-# InRelease from one beside a Packages.gz from the other, which fails apt update
-# for everyone until the next successful run. Queued rather than cancelled: a
-# half-finished publish is worse than a delayed one.
-concurrency:
-  group: package-repositories
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -113,6 +105,20 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # Scoped to this job, not the workflow: only one pending run is kept per
+    # concurrency group, so covering `build` too would let a third tag pushed in
+    # quick succession cancel the second one's build and leave that release with
+    # no packages attached at all. A cancelled publish is self-healing -- the
+    # next one rebuilds from every release asset -- while a cancelled build is
+    # not.
+    #
+    # Two runs replacing the same apt-history assets at once can leave a signed
+    # InRelease from one beside a Packages.gz from the other, which fails apt
+    # update for everyone until the next successful run. Queued rather than
+    # cancelled: a half-finished publish is worse than a delayed one.
+    concurrency:
+      group: package-repositories
+      cancel-in-progress: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

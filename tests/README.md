@@ -92,10 +92,18 @@ via `with_pkg_mocks`, which stands in for `gh`, `curl`, `gpg` and `createrepo_c`
 package to be signed already, so invoking it means the script signed something it
 should have skipped.
 
-`mocks/pkg/createrepo_c` emits all three metadata types rather than just
-`primary`, because `yum_xmlbase.py` rewrites `primary` and copies the others
-through — a mock with one type would leave the branch that refuses an
-unrecognised type unexercised.
+Two of those mocks deliberately model the tool rather than the caller:
+
+- `mocks/pkg/createrepo_c` emits all three metadata types rather than just
+  `primary`, because `yum_xmlbase.py` rewrites `primary` and copies the others
+  through. It also defaults to **zstd**, as createrepo_c 1.x does, and writes
+  gzip only when `--general-compress-type` asks for it — so dropping that flag
+  fails the tests the way it would fail a release.
+- `mocks/pkg/gh` really stores what `release upload` is given, and a tag in
+  `MOCK_UPLOAD_FAIL_TAGS` has its assets deleted *before* the failure, which is
+  what `--clobber` does when the upload half of a replacement breaks. A mock
+  that failed without deleting would model a kinder API than the real one and
+  hide what the retries exist for.
 
 ## Regressions locked in
 

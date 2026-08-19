@@ -2208,6 +2208,122 @@ test_rebuild_yum_index_points_at_the_releases() {
     fi
 }
 
+# A published YUM index the curl mock will serve, listing the given package
+# names under the pre-migration packages/ prefix.
+publish_yum_index() { # <name>...
+    mkdir -p "$MOCK_ASSET_DIR/yum/repodata"
+    python3 - "$MOCK_ASSET_DIR/yum/repodata" "$@" <<'PY'
+import gzip, hashlib, os, sys
+out, names = sys.argv[1], sys.argv[2:]
+pkgs = "".join(f'<package type="rpm"><location href="packages/{n}"/></package>\n'
+               for n in names)
+body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<metadata xmlns="http://linux.duke.edu/metadata/common" packages="{len(names)}">\n'
+        f'{pkgs}</metadata>\n').encode()
+gz = gzip.compress(body, mtime=0)
+name = f"{hashlib.sha256(gz).hexdigest()}-primary.xml.gz"
+open(os.path.join(out, name), "wb").write(gz)
+open(os.path.join(out, "repomd.xml"), "w").write(
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<repomd xmlns="http://linux.duke.edu/metadata/repo">\n'
+    f'  <data type="primary"><location href="repodata/{name}"/></data>\n'
+    '</repomd>\n')
+PY
+}
+
+test_rebuild_yum_shrink_names_what_went_missing() {
+    # The published index is the comparison point, so this is the branch that
+    # runs whenever anything is already published — every other pkg/ test hits
+    # the 404 "nothing published yet" path instead.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+    publish_yum_index proxmox-sleep-1.0.0-1.noarch.rpm proxmox-sleep-1.1.0-1.noarch.rpm
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "it refuses to publish" "$rc" 1
+    assert_contains "it reads the published count" "$out" "currently published: 2"
+    assert_contains "it names the package that would be dropped" "$out" \
+        "proxmox-sleep-1.0.0-1.noarch.rpm"
+    assert_contains "and says the index lost it" "$out" "yum has lost"
+
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages ALLOW_SHRINK=1 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1); rc=$?
+    assert_rc "ALLOW_SHRINK=1 lets a deliberate deletion through" "$rc" 0
+    assert_not_contains "with no refusal" "$out" "yum has lost"
+}
+
+test_rebuild_publishes_index_and_signature_together() {
+    # The publish half, which the dry-run tests never reach. --clobber deletes
+    # before it writes, so an upload that fails after the index has landed but
+    # before its signature leaves every client with a hash mismatch.
+    local W="$SANDBOX/rb" remote="$SANDBOX/ghp.git"
+    with_pkg_mocks
+    git init -q --bare "$remote"
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages PAGES_REMOTE="$remote" DRY_RUN=0 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "the publish succeeds" "$rc" 0
+
+    # Both halves of the archive must be present, or apt cannot verify it.
+    local f
+    for f in Packages Packages.gz Release Release.gpg InRelease gpg-key.asc; do
+        if [[ ! -f "$MOCK_ASSET_DIR/apt-history/$f" ]]; then
+            fail_assert "apt-history is missing $f"
+        fi
+    done
+    assert_contains "the published index lists the release" \
+        "$(cat "$MOCK_ASSET_DIR/apt-history/Packages")" "Filename: ../v1.1.0/"
+
+    # gh-pages is committed on top rather than force-pushed.
+    assert_contains "gh-pages carries the yum repodata" \
+        "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages)" "yum/repodata/repomd.xml"
+    assert_contains "and the current deb" \
+        "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages)" \
+        "apt/pool/main/proxmox-sleep_1.1.0_all.deb"
+
+    # Re-running converges rather than accumulating.
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages PAGES_REMOTE="$remote" DRY_RUN=0 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$SANDBOX/rb2" 2>&1)
+    assert_contains "a second run publishes the same tree" "$out" "gh-pages"
+}
+
+test_rebuild_retries_a_failed_index_upload() {
+    # Without a retry the archive is left serving an index whose digest is not
+    # the one in its published Release.
+    local W="$SANDBOX/rb" remote="$SANDBOX/ghp.git"
+    with_pkg_mocks
+    git init -q --bare "$remote"
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc calls
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages PAGES_REMOTE="$remote" DRY_RUN=0 \
+          MOCK_UPLOAD_FAIL_TAGS=apt-history UPLOAD_BACKOFF="0 0 0" \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "a failed upload is fatal" "$rc" 1
+    calls=$(grep -c 'gh release upload' "$MOCK_CALL_LOG" || true)
+    if [[ "$calls" -lt 2 ]]; then
+        fail_assert "the upload was not retried (attempts: $calls)"
+    fi
+    assert_not_contains "and gh-pages was not published over the failure" \
+        "$(git --git-dir="$remote" ls-tree -r --name-only gh-pages 2>&1)" "repomd.xml"
+}
+
 test_rebuild_refuses_a_work_dir_inside_a_checkout() {
     # The work directory is wiped, so a path inside a checkout would delete
     # tracked files.
@@ -2376,6 +2492,9 @@ run_test "pkg/rebuild-apt-shrink-by-name"        test_rebuild_apt_shrink_is_comp
 run_test "pkg/resign-broken-backup"              test_resign_refuses_a_backup_it_cannot_vouch_for
 run_test "pkg/resign-bad-flag-value"             test_resign_rejects_an_unrecognised_flag_value
 run_test "pkg/rebuild-yum-points-at-releases"    test_rebuild_yum_index_points_at_the_releases
+run_test "pkg/rebuild-yum-shrink-names"          test_rebuild_yum_shrink_names_what_went_missing
+run_test "pkg/rebuild-publishes-both-halves"     test_rebuild_publishes_index_and_signature_together
+run_test "pkg/rebuild-retries-upload"            test_rebuild_retries_a_failed_index_upload
 run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout
 run_test "pkg/rebuild-refuses-foreign-dir"       test_rebuild_refuses_a_directory_it_did_not_create
 run_test "pkg/resign-refuses-whitespace"         test_resign_refuses_a_work_dir_with_whitespace

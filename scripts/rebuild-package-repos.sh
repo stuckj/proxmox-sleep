@@ -56,6 +56,10 @@ DRY_RUN="${DRY_RUN:-1}"
 # to one release for the indexes below to resolve, and two packages sharing a
 # version cannot both be offered, so these are left out of the archive.
 EXCLUDE_TAGS="${EXCLUDE_TAGS-v0.9.0 v0.9.1}"
+# Waits before each retry of a release-asset upload. The limit that bites is the
+# secondary one, which caps content-generating requests per minute, so retrying
+# within seconds just spends attempts against a block still in force.
+UPLOAD_BACKOFF="${UPLOAD_BACKOFF:-0 30 120 300}"
 # Paths on gh-pages this script replaces. Everything else on the branch is left
 # alone, so anything added later survives. yum/ is replaced wholesale, which is
 # what moves the rpms out of yum/packages/ and into the releases.
@@ -505,7 +509,12 @@ say "build gh-pages YUM repodata (full history, packages via xml:base)"
 # --no-database: only primary.xml carries package locations, so the sqlite copies
 # cannot be redirected to the releases. Shipping them would advertise packages/
 # paths that no longer exist to any client that prefers sqlite.
-createrepo_c --quiet --no-database stage/rpm
+#
+# --general-compress-type gz: createrepo_c 1.x defaults primary/filelists/other
+# to zstd, which yum_xmlbase.py cannot read -- and the runner's python has no
+# zstd module before 3.14. Accepted by every version from 0.17 on, so pinning it
+# keeps this working across an ubuntu-latest bump.
+createrepo_c --quiet --no-database --general-compress-type gz stage/rpm
 mkdir -p pages/yum
 python3 "$SCRIPTS/yum_xmlbase.py" stage/rpm/repodata pages/yum/repodata assetmap.txt "$BASE"
 detach pages/yum/repodata/repomd.xml.asc pages/yum/repodata/repomd.xml
@@ -563,12 +572,32 @@ pre-release so it never shows as latest.
 # disagrees with the signature, and has to re-run apt update. Either order leaves
 # such a window; indexes first only makes it shorter, because the signature files
 # are small and land quickly after them.
-gh release upload "$tag" --repo "$REPO" --clobber \
-  apt/history/{Packages,Packages.gz} apt/gpg-key.asc >/dev/null \
+#
+# Retried, because the window only stays brief if the upload eventually lands.
+# Giving up after the delete leaves the archive serving a Packages whose digest
+# is not the one in the published Release, and every client with the archive
+# enabled gets "Hash Sum mismatch" on apt update until someone re-runs this.
+upload_assets() {  # upload_assets <tag> <file>...
+  local tag="$1"; shift
+  local delay ok=0
+  # shellcheck disable=SC2086
+  for delay in $UPLOAD_BACKOFF; do
+    if [ "$delay" != 0 ]; then
+      echo "      waiting ${delay}s before retrying $tag"
+      sleep "$delay"
+    fi
+    if gh release upload "$tag" "$@" --clobber --repo "$REPO" >upload.log 2>&1 </dev/null; then
+      ok=1; break
+    fi
+    sed 's/^/      /' upload.log
+  done
+  [ "$ok" = 1 ]
+}
+upload_assets "$tag" apt/history/Packages apt/history/Packages.gz apt/gpg-key.asc \
   || die "could not upload indexes to $tag"
-gh release upload "$tag" --repo "$REPO" --clobber \
-  apt/history/{Release,Release.gpg,InRelease} >/dev/null \
-  || die "could not upload signatures to $tag"
+upload_assets "$tag" apt/history/Release apt/history/Release.gpg apt/history/InRelease \
+  || die "could not upload signatures to $tag — the index and its signature now
+       disagree, so apt update reports a hash mismatch until this is re-run."
 echo "  published -> $tag"
 
 say "publish gh-pages"
