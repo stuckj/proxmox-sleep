@@ -78,10 +78,12 @@ sudo dnf install proxmox-sleep
 sudo dnf install proxmox-sleep-1.0.0   # or pin an older version</pre>
 
   <h2>Where the packages live</h2>
-  <p>Package files are served from the per-version
-  <a href="https://github.com/${REPO}/releases">GitHub releases</a>; these repositories carry
-  only the indexes. The APT archive reaches them with a relative
-  <code>Filename</code>, and the YUM metadata with a per-package <code>xml:base</code>.</p>
+  <p>Every version other than the current one is served straight from the per-version
+  <a href="https://github.com/${REPO}/releases">GitHub releases</a>: the APT archive and the
+  YUM repository hold indexes pointing at them rather than copies. The APT archive reaches
+  them with a relative <code>Filename</code>, and the YUM metadata with a per-package
+  <code>xml:base</code>. Only the current release's <code>.deb</code> is stored here, under
+  <code>apt/pool/main</code>.</p>
 
   <h2>Links</h2>
   <ul>

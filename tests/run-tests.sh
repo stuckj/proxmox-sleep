@@ -2134,6 +2134,80 @@ test_rebuild_apt_shrink_is_compared_by_name() {
     assert_contains "and the run carried on past the guard" "$out" "stable: pinned at"
 }
 
+test_resign_refuses_a_backup_it_cannot_vouch_for() {
+    # A manifest row whose file is gone or altered must not be re-derived from
+    # the release: after a replacement the release serves the signed bytes, and
+    # recording those as the original leaves every later check comparing the
+    # manifest against itself.
+    local W="$SANDBOX/resign" key=aaaabbbbccccdddd
+    local one=proxmox-sleep-1.0.0-1.noarch.rpm
+    with_pkg_mocks
+    mkdir -p "$MOCK_ASSET_DIR/v1.0.0"
+    fixture "$MOCK_ASSET_DIR/v1.0.0/$one" --sig-tag 267 --issuer "$key" --digests
+    write_releases_tsv split
+    GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" >/dev/null 2>&1
+
+    local out rc
+    printf 'tampered' > "$W/backup/v1.0.0/$one"
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "an altered backup is fatal" "$rc" 1
+    assert_contains "and it says which file" "$out" "$one"
+
+    rm -f "$W/backup/v1.0.0/$one"
+    out=$(GPG_KEY_ID="$key" bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$W" 2>&1); rc=$?
+    assert_rc "a missing backup is fatal" "$rc" 1
+    assert_contains "rather than silently re-fetching it" "$out" "is gone"
+}
+
+test_resign_rejects_an_unrecognised_flag_value() {
+    # RESTORE selects what the run does, so folding an unrecognised value to a
+    # default would turn "put the originals back" into "publish".
+    local out rc
+    out=$(GPG_KEY_ID=dummy RESTORE=true \
+          bash "$REPO_ROOT/scripts/resign-release-rpms.sh" "$SANDBOX/w" 2>&1); rc=$?
+    assert_rc "refuses" "$rc" 1
+    assert_contains "and names the flag" "$out" "RESTORE must be 0 or 1"
+}
+
+test_rebuild_yum_index_points_at_the_releases() {
+    # The whole pipeline, not yum_xmlbase.py alone: the assetmap, base URL and
+    # signing have to be wired to it correctly, and a wrong yum index breaks
+    # every dnf client.
+    local W="$SANDBOX/rb"
+    with_pkg_mocks
+    make_deb v1.1.0 1.1.0
+    fixture "$MOCK_ASSET_DIR/v1.1.0/proxmox-sleep-1.1.0-1.noarch.rpm" --digests
+    write_releases_tsv joined
+
+    local out rc
+    out=$(GPG_KEY_ID=dummy EXCLUDE_TAGS='' RELEASE_BASE=https://fake \
+          PAGES_URL=https://fake-pages EXPECT_TAG=v1.1.0 \
+          bash "$REPO_ROOT/scripts/rebuild-package-repos.sh" "$W" 2>&1); rc=$?
+    assert_rc "the rebuild completes" "$rc" 0
+    assert_contains "the release is confirmed in both indexes" "$out" \
+        "confirmed v1.1.0 is in both"
+
+    local primary repomd
+    primary=$(gzip -dc "$W"/pages/yum/repodata/*primary.xml.gz)
+    assert_contains "the package points at its release" "$primary" \
+        'xml:base="https://fake/v1.1.0/"'
+    assert_contains "by bare asset name" "$primary" 'href="proxmox-sleep-1.1.0-1.noarch.rpm"'
+    assert_not_contains "and not at a path under the repository" "$primary" 'href="packages/'
+
+    # Everything repomd.xml names must exist and match, or dnf rejects the repo.
+    repomd=$(cat "$W/pages/yum/repodata/repomd.xml")
+    local href sha
+    while IFS= read -r href; do
+        [[ -f "$W/pages/yum/$href" ]] || fail_assert "repomd names a missing file: $href"
+        sha=$(sha256sum "$W/pages/yum/$href" | awk '{print $1}')
+        assert_contains "the digest for $href matches the file" "$repomd" "$sha"
+    done < <(printf '%s\n' "$repomd" | sed -n 's|.*<location href="\(repodata/[^"]*\)".*|\1|p')
+
+    if [[ ! -f "$W/pages/yum/repodata/repomd.xml.asc" ]]; then
+        fail_assert "the repodata was not signed"
+    fi
+}
+
 test_rebuild_refuses_a_work_dir_inside_a_checkout() {
     # The work directory is wiped, so a path inside a checkout would delete
     # tracked files.
@@ -2299,6 +2373,9 @@ run_test "pkg/resign-narrowed-run-ok"            test_resign_narrowed_run_does_n
 run_test "pkg/resign-restore-bad-tag"            test_resign_restore_rejects_a_tag_it_cannot_serve
 run_test "pkg/resign-skips-already-signed"       test_resign_skips_what_is_already_published_signed
 run_test "pkg/rebuild-apt-shrink-by-name"        test_rebuild_apt_shrink_is_compared_by_name
+run_test "pkg/resign-broken-backup"              test_resign_refuses_a_backup_it_cannot_vouch_for
+run_test "pkg/resign-bad-flag-value"             test_resign_rejects_an_unrecognised_flag_value
+run_test "pkg/rebuild-yum-points-at-releases"    test_rebuild_yum_index_points_at_the_releases
 run_test "pkg/rebuild-refuses-checkout"          test_rebuild_refuses_a_work_dir_inside_a_checkout
 run_test "pkg/rebuild-refuses-foreign-dir"       test_rebuild_refuses_a_directory_it_did_not_create
 run_test "pkg/resign-refuses-whitespace"         test_resign_refuses_a_work_dir_with_whitespace

@@ -109,9 +109,9 @@ sudo dnf install proxmox-sleep
 sudo dnf install proxmox-sleep-1.0.0   # or pin an older version
 ```
 
-The package files themselves are served from the per-version
-[GitHub releases](https://github.com/stuckj/proxmox-sleep/releases); these
-repositories carry only the indexes.
+Every version other than the current one is served straight from the per-version
+[GitHub releases](https://github.com/stuckj/proxmox-sleep/releases) — the APT
+archive and the YUM repository hold indexes pointing at them rather than copies.
 
 After installation, configure the package:
 

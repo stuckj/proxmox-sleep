@@ -31,8 +31,17 @@
 # and GPG_KEY_ID set, and rpmsign built with gpg support. Ubuntu's rpm package
 # does not include signing; run this on Fedora, or in a container:
 #
-#   podman run --rm -it -v "$PWD:/repo" -v "$HOME/.gnupg:/root/.gnupg" fedora:latest \
-#     bash -c 'dnf install -y rpm-sign gnupg2 git-core gh python3 && /repo/scripts/resign-release-rpms.sh /tmp/resign'
+#   mkdir -p ~/proxmox-sleep-resign
+#   podman run --rm -it -v "$PWD:/repo:ro" -v "$HOME/.gnupg:/root/.gnupg" \
+#              -v "$HOME/proxmox-sleep-resign:/work" fedora:latest bash
+#   dnf install -y rpm-sign gnupg2 git-core gh python3
+#   /repo/scripts/resign-release-rpms.sh /work
+#
+# The work directory must be a bind mount that outlives the container. It holds
+# the only copy of every original once an asset has been replaced, and a run that
+# dies between a delete and its upload is recovered from it -- so a container's
+# own filesystem, which --rm discards when the shell exits, would take the
+# recovery path with it.
 #
 # Usage: resign-release-rpms.sh <work-dir>
 set -euo pipefail
@@ -41,9 +50,9 @@ SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GITHUB_REPOSITORY:-stuckj/proxmox-sleep}"
 KEY="${GPG_KEY_ID:?GPG_KEY_ID must be set}"
 # Every key id that counts as "ours" when deciding whether a package is already
-# correctly signed. gpg signs with a signing subkey when the key has one, so the
-# id on the signature is not necessarily the primary's. Falls back to the
-# primary alone.
+# correctly signed, comma separated. gpg signs with a signing subkey when the key
+# has one, so the id on the signature is not necessarily the primary's. Falls
+# back to the primary alone.
 KEY_IDS="${GPG_KEY_IDS:-$KEY}"
 export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 # Uploading requires PUBLISH=1 explicitly: the upload overwrites the only copy
@@ -69,6 +78,17 @@ UPLOAD_PACE="${UPLOAD_PACE:-5}"
 
 say() { printf '\n== %s\n' "$1"; }
 die() { echo "FATAL: $*" >&2; exit 1; }
+
+# These two select *what* the run does, so an unrecognised value cannot be
+# folded to a default the way PUBLISH is: RESTORE=true would otherwise skip the
+# restore and take the publishing path with PUBLISH=1 still honoured.
+for _flag in RESTORE FORCE; do
+  case "${!_flag}" in
+    0|1) ;;
+    *) die "$_flag must be 0 or 1, not '${!_flag}'" ;;
+  esac
+done
+unset _flag
 
 [ $# -eq 1 ] || die "usage: $(basename "$0") <work-dir>"
 WORK="$(realpath -m -- "$1")" || die "cannot resolve '$1'"
@@ -315,9 +335,20 @@ while IFS=$'\t' read -r tag name size url; do
   mkdir -p "backup/$tag"
   dst="backup/$tag/$name"
   recorded=$(awk -F'\t' -v t="$tag" -v n="$name" '$1 == t && $2 == n {print $4; exit}' manifest.prev)
-  if [ -n "$recorded" ] && [ -f "$dst" ] \
-     && [ "$(sha256sum "$dst" | awk '{print $1}')" = "$recorded" ]; then
-    # Already held, and the bytes still match what was recorded. Left untouched.
+  if [ -n "$recorded" ]; then
+    # A row that already exists is never re-derived from the release. Once an
+    # asset has been replaced the release serves the *signed* bytes, so copying
+    # those in would leave the manifest vouching for them as the original and
+    # every later check would pass, comparing the manifest against itself.
+    [ -f "$dst" ] \
+      || die "backup/manifest.tsv records $tag/$name but $WORK/backup/$tag/$name
+       is gone. Put the file back, or delete its row deliberately — re-fetching
+       it would record whatever the release serves now as the original."
+    [ "$(sha256sum "$dst" | awk '{print $1}')" = "$recorded" ] \
+      || die "$WORK/backup/$tag/$name does not match the checksum recorded for
+       it. Restore the file or delete its row deliberately; this script will not
+       silently adopt different bytes as the original."
+    # Held, and still the bytes that were recorded. Left untouched.
     awk -F'\t' -v t="$tag" -v n="$name" '$1 == t && $2 == n {print; exit}' manifest.prev >> manifest.new
     continue
   fi

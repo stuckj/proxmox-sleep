@@ -174,22 +174,31 @@ into `backup/manifest.tsv` **before** anything is uploaded, re-verifies that
 manifest immediately before the first delete, and can put it all back.
 
 `rpmsign` needs an rpm built with gpg support, which Ubuntu's `rpm` package is
-not. Run it on Fedora, or in a container:
+not. Run it on Fedora, or in a container.
+
+**The work directory must be a bind mount from the host.** It holds the only copy
+of every original once an asset has been replaced, so a container's own
+filesystem — which `--rm` discards the moment the shell exits — would take the
+recovery path with it.
 
 ```bash
-podman run --rm -it -v "$PWD:/repo" -v "$HOME/.gnupg:/root/.gnupg" fedora:latest bash
+mkdir -p ~/proxmox-sleep-resign
+
+podman run --rm -it -v "$PWD:/repo:ro" -v "$HOME/.gnupg:/root/.gnupg" \
+           -v "$HOME/proxmox-sleep-resign:/work" fedora:latest bash
 dnf install -y rpm-sign gnupg2 git-core gh python3
 
 export GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=<token>
 
 # 1. Download, back up, sign and verify — publishes nothing
-/repo/scripts/resign-release-rpms.sh /tmp/resign
+/repo/scripts/resign-release-rpms.sh /work
 
 # 2. Replace the published assets
-PUBLISH=1 /repo/scripts/resign-release-rpms.sh /tmp/resign
+PUBLISH=1 /repo/scripts/resign-release-rpms.sh /work
 
-# If step 2 goes wrong, put the originals back
-RESTORE=1 PUBLISH=1 /repo/scripts/resign-release-rpms.sh /tmp/resign
+# If step 2 goes wrong, put the originals back. Name the release that lost a
+# package; without ONLY_TAGS this reverts every release to its unsigned original.
+RESTORE=1 PUBLISH=1 ONLY_TAGS='v1.1.0' /repo/scripts/resign-release-rpms.sh /work
 ```
 
 Re-signing changes each package's bytes, so **the repositories must be rebuilt
@@ -200,8 +209,8 @@ DRY_RUN=0 GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=<token> \
   scripts/rebuild-package-repos.sh /tmp/repobuild
 ```
 
-Keep `<work>/backup` until a real `dnf install` has been tried against the
-rebuilt repository.
+Keep `~/proxmox-sleep-resign/backup` until a real `dnf install` has been tried
+against the rebuilt repository.
 
 ### Verifying it worked
 

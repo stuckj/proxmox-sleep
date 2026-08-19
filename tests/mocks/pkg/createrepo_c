@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Mock `createrepo_c`, which is not installable on the test runner.
+
+Models the shape yum_xmlbase.py consumes, not just the part it rewrites: three
+data types (primary, filelists, other), digest-prefixed filenames as
+--unique-md-filenames produces, and package hrefs relative to the repository
+root. Emitting only `primary` would leave the copy-through branch — the one that
+refuses an unrecognised type — unexercised.
+"""
+import gzip
+import hashlib
+import os
+import sys
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+root = args[0] if args else "."
+rpms = sorted(f for f in os.listdir(root) if f.endswith(".rpm"))
+out = os.path.join(root, "repodata")
+os.makedirs(out, exist_ok=True)
+
+# createrepo_c stamps each package's filesystem mtime into <time file="...">;
+# yum_xmlbase.py zeroes it so an unchanged package set rebuilds byte-identically.
+packages = "".join(
+    f'<package type="rpm"><name>proxmox-sleep</name>'
+    f'<location href="{n}"/>'
+    f'<time file="1750000000" build="1750000000"/></package>\n'
+    for n in rpms)
+
+bodies = {
+    "primary": ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<metadata xmlns="http://linux.duke.edu/metadata/common" '
+                f'packages="{len(rpms)}">\n{packages}</metadata>\n').encode(),
+    "filelists": ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                  f'<filelists packages="{len(rpms)}"/>\n').encode(),
+    "other": ('<?xml version="1.0" encoding="UTF-8"?>\n'
+              f'<otherdata packages="{len(rpms)}"/>\n').encode(),
+}
+
+entries = []
+for kind, body in bodies.items():
+    gz = gzip.compress(body, mtime=0)
+    name = f"{hashlib.sha256(gz).hexdigest()}-{kind}.xml.gz"
+    with open(os.path.join(out, name), "wb") as fh:
+        fh.write(gz)
+    entries.append(
+        f'  <data type="{kind}">\n'
+        f'    <checksum type="sha256">{hashlib.sha256(gz).hexdigest()}</checksum>\n'
+        f'    <open-checksum type="sha256">{hashlib.sha256(body).hexdigest()}</open-checksum>\n'
+        f'    <location href="repodata/{name}"/>\n'
+        f'    <size>{len(gz)}</size>\n    <open-size>{len(body)}</open-size>\n'
+        f'  </data>\n')
+
+with open(os.path.join(out, "repomd.xml"), "w") as fh:
+    fh.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+             '<repomd xmlns="http://linux.duke.edu/metadata/repo">\n'
+             '  <revision>1</revision>\n' + "".join(entries) + '</repomd>\n')

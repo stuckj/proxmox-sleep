@@ -87,10 +87,15 @@ signature, a non-signature packet, or a truncated file — so what each test
 asserts stays visible in the test rather than in a committed binary.
 
 The tests that drive the release scripts end to end add `mocks/pkg/` to `PATH`
-via `with_pkg_mocks`, which stands in for `gh`, `curl` and `gpg`. `mocks/pkg/rpmsign`
-is deliberately a failing stub: those tests arrange for every package to be
-signed already, so invoking it means the script signed something it should have
-skipped.
+via `with_pkg_mocks`, which stands in for `gh`, `curl`, `gpg` and `createrepo_c`.
+`mocks/pkg/rpmsign` is deliberately a failing stub: those tests arrange for every
+package to be signed already, so invoking it means the script signed something it
+should have skipped.
+
+`mocks/pkg/createrepo_c` emits all three metadata types rather than just
+`primary`, because `yum_xmlbase.py` rewrites `primary` and copies the others
+through — a mock with one type would leave the branch that refuses an
+unrecognised type unexercised.
 
 ## Regressions locked in
 
