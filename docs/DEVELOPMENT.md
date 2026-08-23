@@ -205,14 +205,14 @@ For each comment, Claude must:
 
 ```bash
 # After making the fix, reply to the comment
-gh api repos/{owner}/{repo}/pulls/comments/{comment_id}/replies \
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies \
   -f body="Fixed in commit abc1234. Added null check as suggested."
 ```
 
 ##### If Not Fixing (with justification):
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/comments/{comment_id}/replies \
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies \
   -f body="No fix needed: This variable is guaranteed non-null by the validation on line 42. The function only accepts validated input from \`parse_config()\` which throws on null values."
 ```
 
@@ -418,7 +418,7 @@ gh pr view --comments
 gh api repos/{owner}/{repo}/pulls/{pr}/comments
 
 # Reply to a comment
-gh api repos/{owner}/{repo}/pulls/comments/{id}/replies -f body="message"
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies -f body="message"
 
 # View CI status
 gh pr checks
