@@ -28,16 +28,22 @@ jobs:
       - name: Show bash version
         run: bash --version | head -1
 
-      - name: Syntax check all shell scripts
+      - name: Syntax check every script
         run: |
-          # -type f so the mock subdirectories are skipped rather than fed to
-          # bash -n (which would fail the step under the runner's `set -e`).
+          # Dispatch on the shebang, not the name: the mocks have no extension
+          # and some of them are Python, so a name-based rule would hand a
+          # Python file to `bash -n` and fail the step under the runner's
+          # `set -e` -- before the suite below ever runs.
           while IFS= read -r -d '' f; do
-            echo "checking $f"
-            bash -n "$f"
+            case "$(head -1 "$f")" in
+              *python*) echo "python  $f"; python3 -m py_compile "$f" ;;
+              *bash*|*sh) echo "bash    $f"; bash -n "$f" ;;
+              *) echo "::error::$f has no recognised shebang, so nothing checked it"
+                 exit 1 ;;
+            esac
           done < <(find . -type f \
-                        \( -name '*.sh' -o -path './tests/mocks/*' \) \
-                        -not -path './.git/*' -print0)
+                        \( -name '*.sh' -o -name '*.py' -o -path './tests/mocks/*' \) \
+                        -not -path './.git/*' -not -path '*/__pycache__/*' -print0)
 
       - name: Run offline test suite
         run: tests/run-tests.sh

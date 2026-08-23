@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+# Mock `curl` for the packaging tests. Serves release assets out of
+# $MOCK_ASSET_DIR: a URL ending in <tag>/<name> resolves to
+# $MOCK_ASSET_DIR/<tag>/<name>. A URL with no file there 404s the way the real
+# thing does — exit 22 for `-f`, and `%{http_code}` reported as 404 for `-w`.
+
+set -uo pipefail
+
+out=""
+write=""
+url=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -w) write="$2"; shift 2 ;;
+        --retry|--retry-delay|--connect-timeout|--speed-limit|--speed-time|--max-time)
+            shift 2 ;;
+        -*) shift ;;
+        *)  url="$1"; shift ;;
+    esac
+done
+
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'curl %s\n' "$url" >> "$MOCK_CALL_LOG"
+
+# Everything after the host, so both .../download/<tag>/<name> and a bare
+# https://host/<tag>/<name> resolve the same way.
+rel="${url#*://}"
+rel="${rel#*/}"
+src="${MOCK_ASSET_DIR:-/nonexistent}/$rel"
+
+if [[ -f "$src" ]]; then
+    if [[ -n "$out" ]]; then
+        # A basename in $MOCK_TRUNCATE_ASSETS is served short, the way an
+        # interrupted transfer leaves a file. curl reports success for it, which
+        # is why the caller has to size-check rather than trust the exit status.
+        if [[ " ${MOCK_TRUNCATE_ASSETS:-} " == *" $(basename "$src") "* ]]; then
+            head -c 16 -- "$src" > "$out"
+        else
+            cp -- "$src" "$out"
+        fi
+    fi
+    [[ -n "$write" ]] && printf '200'
+    exit 0
+fi
+
+[[ -n "$write" ]] && printf '404'
+exit 22

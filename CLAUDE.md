@@ -194,14 +194,14 @@ For each comment (tracked by ID):
 **When implementing a fix**:
 ```bash
 COMMENT_ID=12345678
-gh api "repos/${REPO}/pulls/comments/${COMMENT_ID}/replies" \
+gh api "repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies" \
   -f body="Fixed in commit \`abc1234\`. Added null check as suggested."
 ```
 
 **When not fixing (with justification)**:
 ```bash
 COMMENT_ID=12345679
-gh api "repos/${REPO}/pulls/comments/${COMMENT_ID}/replies" \
+gh api "repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies" \
   -f body="No fix needed: This variable is guaranteed non-null because the \`validate_config()\` function on line 42 validates all inputs before this code path is reached."
 ```
 
@@ -293,7 +293,7 @@ tests/run-tests.sh gaming     # filter by test name substring
 bash -n proxmox-sleep-manager.sh
 
 # Shellcheck
-shellcheck -x *.sh
+shellcheck -x *.sh scripts/*.sh
 
 # Test single idle check
 ./proxmox-idle-monitor.sh check
@@ -318,6 +318,11 @@ host, such as hibernation timeouts and a GPU bound to `vfio-pci`.
 | `uninstall.sh` | Cleanup script |
 | `nfpm.yaml` | Package definition |
 | `.github/workflows/release.yml` | CI/CD pipeline |
+| `scripts/rebuild-package-repos.sh` | Builds the APT/YUM indexes from the release assets |
+| `scripts/resign-release-rpms.sh` | One-off backfill: signs already-published rpms |
+| `scripts/check-rpm-signature.py` | Fails the build when an rpm came out unsigned |
+| `scripts/yum_xmlbase.py` | Points the YUM repodata at the release assets |
+| `scripts/repo-index.sh` | Generates the package-repository landing page |
 
 ## Project Conventions
 
@@ -355,7 +360,10 @@ fails when it stops being true, plus the dated PR or issue.
   success but creates no timeline event and no review.
 - **The bot account cannot resolve review threads or write PR metadata.** It has push but not
   admin; those calls fail as 404 rather than 403. Replying to a review comment works; marking
-  the thread resolved does not.
+  the thread resolved does not. The reply endpoint needs the PR number —
+  `repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies`. The shorter
+  `pulls/comments/<id>/replies` form is not a route and also 404s, which is easy to misread as
+  the permission limit above.
 - **`gh pr edit` fails against this repo and discards the edit.** It hits the deprecated
   projects-classic GraphQL field (`repository.pullRequest.projectCards`), prints only the
   deprecation notice, and **exits 0** — so the edit looks like it worked and did not. Use

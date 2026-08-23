@@ -205,14 +205,14 @@ For each comment, Claude must:
 
 ```bash
 # After making the fix, reply to the comment
-gh api repos/{owner}/{repo}/pulls/comments/{comment_id}/replies \
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies \
   -f body="Fixed in commit abc1234. Added null check as suggested."
 ```
 
 ##### If Not Fixing (with justification):
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/comments/{comment_id}/replies \
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies \
   -f body="No fix needed: This variable is guaranteed non-null by the validation on line 42. The function only accepts validated input from \`parse_config()\` which throws on null values."
 ```
 
@@ -365,7 +365,7 @@ bash -n proxmox-sleep-manager.sh
 bash -n proxmox-idle-monitor.sh
 
 # Run shellcheck
-shellcheck -x *.sh
+shellcheck -x *.sh scripts/*.sh
 
 # Test idle check (single iteration)
 ./proxmox-idle-monitor.sh check
@@ -396,9 +396,9 @@ git tag -a v1.1.0 -m "Release v1.1.0"
 git push origin v1.1.0
 
 # 3. GitHub Actions automatically:
-#    - Builds deb/rpm packages
+#    - Builds deb/rpm packages, signing the rpm and failing if it came out unsigned
 #    - Creates GitHub Release
-#    - Updates package repositories
+#    - Rebuilds the APT and YUM indexes from the release assets
 ```
 
 ---
@@ -418,7 +418,7 @@ gh pr view --comments
 gh api repos/{owner}/{repo}/pulls/{pr}/comments
 
 # Reply to a comment
-gh api repos/{owner}/{repo}/pulls/comments/{id}/replies -f body="message"
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies -f body="message"
 
 # View CI status
 gh pr checks

@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Mock `createrepo_c`, which is not installable on the test runner.
+
+Models the shape yum_xmlbase.py consumes, not just the part it rewrites: three
+data types (primary, filelists, other), digest-prefixed filenames as
+--unique-md-filenames produces, and package hrefs relative to the repository
+root. Emitting only `primary` would leave the copy-through branch — the one that
+refuses an unrecognised type — unexercised.
+
+Compression follows the real tool rather than what the caller wants to read.
+createrepo_c 1.x defaults primary/filelists/other to zstd and only writes gzip
+when --general-compress-type says so, so a caller that forgets the flag gets
+zstd here too and fails the same way it would in CI. The zstd output is a stub —
+correct magic and extension, not real zstd — which is enough, because what is
+being checked is that the caller asked for gzip.
+"""
+import gzip
+import hashlib
+import os
+import sys
+
+argv = sys.argv[1:]
+compress = "zstd"
+positional = []
+i = 0
+while i < len(argv):
+    if argv[i] == "--general-compress-type":
+        compress = argv[i + 1].lower()
+        i += 2
+    elif argv[i].startswith("--general-compress-type="):
+        compress = argv[i].split("=", 1)[1].lower()
+        i += 1
+    elif argv[i].startswith("-"):
+        i += 1
+    else:
+        positional.append(argv[i])
+        i += 1
+
+root = positional[0] if positional else "."
+rpms = sorted(f for f in os.listdir(root) if f.endswith(".rpm"))
+out = os.path.join(root, "repodata")
+os.makedirs(out, exist_ok=True)
+
+# The real tool stamps each package's *filesystem* mtime here, and the packages
+# are re-downloaded on every run, so this value genuinely moves between rebuilds.
+# yum_xmlbase.py zeroes it for exactly that reason; a constant here would let
+# that line be deleted with every test still passing.
+packages = "".join(
+    f'<package type="rpm"><name>proxmox-sleep</name>'
+    f'<location href="{n}"/>'
+    f'<time file="{int(os.path.getmtime(os.path.join(root, n)))}" '
+    f'build="1750000000"/></package>\n'
+    for n in rpms)
+
+bodies = {
+    "primary": ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<metadata xmlns="http://linux.duke.edu/metadata/common" '
+                f'packages="{len(rpms)}">\n{packages}</metadata>\n').encode(),
+    "filelists": ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                  f'<filelists packages="{len(rpms)}"/>\n').encode(),
+    "other": ('<?xml version="1.0" encoding="UTF-8"?>\n'
+              f'<otherdata packages="{len(rpms)}"/>\n').encode(),
+}
+
+if compress in ("gz", "gzip"):
+    ext, pack = "gz", lambda b: gzip.compress(b, mtime=0)
+else:
+    ext, pack = compress, lambda b: b"\x28\xb5\x2f\xfd" + b
+
+entries = []
+for kind, body in bodies.items():
+    blob = pack(body)
+    name = f"{hashlib.sha256(blob).hexdigest()}-{kind}.xml.{ext}"
+    with open(os.path.join(out, name), "wb") as fh:
+        fh.write(blob)
+    entries.append(
+        f'  <data type="{kind}">\n'
+        f'    <checksum type="sha256">{hashlib.sha256(blob).hexdigest()}</checksum>\n'
+        f'    <open-checksum type="sha256">{hashlib.sha256(body).hexdigest()}</open-checksum>\n'
+        f'    <location href="repodata/{name}"/>\n'
+        f'    <size>{len(blob)}</size>\n    <open-size>{len(body)}</open-size>\n'
+        f'  </data>\n')
+
+with open(os.path.join(out, "repomd.xml"), "w") as fh:
+    fh.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+             '<repomd xmlns="http://linux.duke.edu/metadata/repo">\n'
+             '  <revision>1</revision>\n' + "".join(entries) + '</repomd>\n')
