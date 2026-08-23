@@ -178,7 +178,15 @@ def inspect(path):
     for tag, raw in sorted(signature_header(blob).items()):
         if tag not in SIG_TAGS:
             continue
-        for ptag, body in openpgp_packets(raw):
+        try:
+            packets = list(openpgp_packets(raw))
+        except (IndexError, struct.error):
+            # A tag whose bytes do not parse contributes nothing, rather than
+            # discarding what the other tags hold: nfpm writes the same
+            # signature to two tags, so letting one unreadable tag propagate
+            # would reject a package the other tag vouches for.
+            continue
+        for ptag, body in packets:
             if ptag == 2:                      # signature packet
                 text, key = describe(body)
                 if text == "malformed":

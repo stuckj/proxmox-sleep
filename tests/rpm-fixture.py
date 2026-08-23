@@ -17,6 +17,9 @@ Usage:
   --not-a-sig   put a well-formed OpenPGP packet that is *not* a signature in
                 the signature tag, so a checker that trusts the tag's presence
                 rather than its contents reports the package as signed
+  --garbled-tag N  put bytes in tag N that start an OpenPGP packet and do not
+                finish one, which is what a checker has to survive without
+                discarding the signatures other tags hold
   --truncate    cut the file off inside the signature header
 """
 import struct
@@ -62,12 +65,15 @@ def build(entries):
 def main(argv):
     out = argv[0]
     sig_tags = []
+    garbled_tags = []
     issuer = "cdb7b8f88afccbe3"
     digests = truncate = not_a_sig = False
     i = 1
     while i < len(argv):
         if argv[i] == "--sig-tag":
             sig_tags.append(int(argv[i + 1])); i += 2
+        elif argv[i] == "--garbled-tag":
+            garbled_tags.append(int(argv[i + 1])); i += 2
         elif argv[i] == "--issuer":
             issuer = argv[i + 1]; i += 2
         elif argv[i] == "--digests":
@@ -86,6 +92,10 @@ def main(argv):
     for tag in sig_tags:
         payload = other_packet() if not_a_sig else signature_packet(issuer)
         entries.append((tag, 7, payload))
+    for tag in garbled_tags:
+        # A new-format packet header and nothing after it: enough to begin
+        # parsing, not enough to finish.
+        entries.append((tag, 7, bytes([0xC2])))
     entries.append((1000, 4, struct.pack(">I", 4096)))  # SIZE
 
     blob = LEAD + build(entries)

@@ -1870,6 +1870,25 @@ test_rpm_signature_requires_the_named_key() {
     assert_rc "the right key passes" "$rc" 0
 }
 
+test_rpm_signature_one_unreadable_tag_does_not_veto_another() {
+    # nfpm writes the same signature to two tags, so bytes that do not parse in
+    # one of them must contribute nothing rather than discarding what the other
+    # holds — otherwise a correctly signed package fails the release build.
+    local key=aaaabbbbccccdddd
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --issuer "$key" --garbled-tag 1002 --digests
+    local out rc
+    out=$(sigcheck --key "$key" "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "the readable signature still counts" "$rc" 0
+    assert_contains "and is what gets reported" "$out" "DSAHEADER=EdDSA"
+    assert_not_contains "the unreadable tag is not called a signature" "$out" "PGP="
+
+    # The other direction matters more: unparseable must not become signed.
+    fixture "$SANDBOX/only.rpm" --garbled-tag 267 --digests
+    out=$(sigcheck "$SANDBOX/only.rpm"); rc=$?
+    assert_rc "a package with nothing else is still a failure" "$rc" 1
+    assert_contains "and is named unsigned" "$out" "UNSIGNED"
+}
+
 test_rpm_signature_tag_alone_is_not_proof() {
     # The signature tag is present and holds a well-formed OpenPGP packet that
     # is not a signature. Treating the tag's presence as proof would pass this.
@@ -2516,6 +2535,7 @@ run_test "pkg/sig-eddsa-tag-267"                 test_rpm_signature_eddsa_lands_
 run_test "pkg/sig-rsa-tag-268"                   test_rpm_signature_rsa_tag_268_also_counts
 run_test "pkg/sig-nfpm-shape"                    test_rpm_signature_reads_the_nfpm_shape
 run_test "pkg/sig-requires-named-key"            test_rpm_signature_requires_the_named_key
+run_test "pkg/sig-one-bad-tag-not-fatal"         test_rpm_signature_one_unreadable_tag_does_not_veto_another
 run_test "pkg/sig-tag-alone-not-proof"           test_rpm_signature_tag_alone_is_not_proof
 run_test "pkg/sig-truncated-fails"               test_rpm_signature_truncated_file_is_a_failure
 run_test "pkg/xmlbase-points-at-releases"        test_yum_xmlbase_points_packages_at_releases
