@@ -1870,6 +1870,28 @@ test_rpm_signature_requires_the_named_key() {
     assert_rc "the right key passes" "$rc" 0
 }
 
+test_rpm_signature_empty_key_is_a_usage_error() {
+    # An empty wanted-key set is how "any signature counts" is expressed, so a
+    # --key that parses to nothing would turn the strict check into the loose
+    # one without saying so — and the release workflow always passes --key.
+    local key=aaaabbbbccccdddd
+    fixture "$SANDBOX/pkg.rpm" --sig-tag 267 --issuer "$key" --digests
+    local out rc
+    out=$(sigcheck --key "" "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "an empty key list is a usage error" "$rc" 2
+    assert_contains "and says why" "$out" "no usable key id"
+    out=$(sigcheck --key ",," "$SANDBOX/pkg.rpm"); rc=$?
+    assert_rc "separators with no ids are the same" "$rc" 2
+
+    # The modes either side of it still behave.
+    sigcheck --key "$key" "$SANDBOX/pkg.rpm" >/dev/null; rc=$?
+    assert_rc "a usable key list still passes" "$rc" 0
+    sigcheck --key deadbeefdeadbeef "$SANDBOX/pkg.rpm" >/dev/null; rc=$?
+    assert_rc "and the wrong key is still rejected" "$rc" 1
+    sigcheck "$SANDBOX/pkg.rpm" >/dev/null; rc=$?
+    assert_rc "omitting --key still accepts any signature" "$rc" 0
+}
+
 test_rpm_signature_one_unreadable_tag_does_not_veto_another() {
     # nfpm writes the same signature to two tags, so bytes that do not parse in
     # one of them must contribute nothing rather than discarding what the other
@@ -2535,6 +2557,7 @@ run_test "pkg/sig-eddsa-tag-267"                 test_rpm_signature_eddsa_lands_
 run_test "pkg/sig-rsa-tag-268"                   test_rpm_signature_rsa_tag_268_also_counts
 run_test "pkg/sig-nfpm-shape"                    test_rpm_signature_reads_the_nfpm_shape
 run_test "pkg/sig-requires-named-key"            test_rpm_signature_requires_the_named_key
+run_test "pkg/sig-empty-key-is-usage-error"      test_rpm_signature_empty_key_is_a_usage_error
 run_test "pkg/sig-one-bad-tag-not-fatal"         test_rpm_signature_one_unreadable_tag_does_not_veto_another
 run_test "pkg/sig-tag-alone-not-proof"           test_rpm_signature_tag_alone_is_not_proof
 run_test "pkg/sig-truncated-fails"               test_rpm_signature_truncated_file_is_a_failure

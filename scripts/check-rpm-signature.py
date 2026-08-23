@@ -205,6 +205,14 @@ def main(argv):
     want = set()
     if len(argv) >= 2 and argv[0] == "--key":
         want = {k.strip().lower()[-16:] for k in argv[1].split(",") if k.strip()}
+        # An empty set is how "any signature counts" is expressed below, so a
+        # --key that parses to nothing would silently downgrade the check into
+        # the loose mode the caller passed --key to avoid. Omitting the flag is
+        # the way to ask for that.
+        if not want:
+            print("--key was given no usable key id; omit --key to accept any "
+                  "signature", file=sys.stderr)
+            return 2
         argv = argv[2:]
     if not argv:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
