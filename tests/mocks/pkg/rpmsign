@@ -1,0 +1,11 @@
+#!/bin/bash
+#
+# Mock `rpmsign`, present so resign-release-rpms.sh gets past its
+# `command -v rpmsign` check. The tests that use it arrange for every package to
+# be signed already, so the sign loop skips them all and this is never invoked —
+# calling it is therefore a test bug, and it says so rather than exiting 0.
+
+set -uo pipefail
+[[ -n "${MOCK_CALL_LOG:-}" ]] && printf 'rpmsign %s\n' "$*" >> "$MOCK_CALL_LOG"
+echo "mock rpmsign: called unexpectedly with: $*" >&2
+exit 1

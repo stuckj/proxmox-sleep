@@ -9,16 +9,26 @@ This document describes how to set up package signing and release new versions.
 Generate a dedicated key for signing packages (do this on your local machine):
 
 ```bash
-# Generate a new GPG key (use RSA, 4096 bits, no expiration for simplicity)
 gpg --full-generate-key
 
 # When prompted:
-# - Key type: RSA and RSA (default)
-# - Key size: 4096
 # - Expiration: 0 (does not expire) or set a reasonable expiration
 # - Real name: Proxmox Sleep Manager
 # - Email: your-email@example.com
 # - Comment: Package Signing Key
+```
+
+**The key in use is ed25519 (EdDSA).** That choice decides which distributions
+can install the rpms: rpm gained `PGPPUBKEYALGO_EDDSA` in 4.16.0, so EL8
+(rpm 4.14) cannot import the key at all and `gpgcheck=1` cannot be satisfied
+there. Fedora and RHEL/Alma/Rocky 9 and 10 are fine. Choosing RSA instead would
+cover EL8, at the cost of re-signing every published package under the new key.
+
+Confirm what a key actually is before assuming:
+
+```bash
+gpg --show-keys --with-colons key.asc | awk -F: '/^pub/{print "algo="$4, "bits="$3}'
+# algo=22 is EdDSA, algo=1 is RSA
 ```
 
 ### 2. Export the Private Key
@@ -111,7 +121,131 @@ git push origin v0.9.0
 2. Once complete:
    - Packages are attached to the GitHub Release
    - APT repository is updated at `https://stuckj.github.io/proxmox-sleep/apt`
+     (current version) and in the `apt-history` release (every version)
    - YUM repository is updated at `https://stuckj.github.io/proxmox-sleep/yum`
+     (every version)
+
+## How the repositories are built
+
+The packages live **only** in the per-version GitHub releases. Both repositories
+hold indexes that point back at them, so each package is stored once and the
+indexes can be rebuilt from scratch at any time.
+
+`scripts/rebuild-package-repos.sh` does all of it, and the release workflow runs
+the same script. It reads the releases API, downloads and size-checks every
+asset, and produces:
+
+| Where | What | Covers |
+|---|---|---|
+| `apt-history` release | flat APT index, `Filename: ../<tag>/<asset>` | every version |
+| `gh-pages apt/` | suite `stable`, with the package in `pool/main` | current version only |
+| `gh-pages yum/` | repodata with a per-package `xml:base` | every version |
+
+APT resolves `Filename` against the `sources.list` root and has no absolute
+form, so a Pages-hosted index can only serve packages that are on Pages — hence
+the second, release-hosted repository for the archive. RPM-MD takes an absolute
+`xml:base` per package, so the YUM index needs no equivalent.
+
+Because it is derived from the releases, running it twice produces the same
+repositories. It defaults to a **dry run**; publishing requires `DRY_RUN=0`.
+
+```bash
+# Inspect what would be published, touching nothing
+GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=$(gh auth token) \
+  scripts/rebuild-package-repos.sh /tmp/repobuild
+```
+
+A dry run still signs the indexes it builds — it just publishes none of them — so
+it needs the passphrase like any other invocation.
+
+`v0.9.0` and `v0.9.1` are excluded by default (`EXCLUDE_TAGS`): both published
+packages built without a version, so both releases carry assets named
+`proxmox-sleep-0.0.0.rc0-*` with different bytes. One asset name has to map to
+one release for the indexes to resolve, and two packages claiming one version
+cannot both be offered.
+
+## One-off maintenance: signing the published archive
+
+Packages built before rpm signing existed carry no signature, so `gpgcheck=1`
+rejects them. `scripts/resign-release-rpms.sh` re-signs the published assets in
+place. It is a script rather than a workflow on purpose: it rewrites every
+published package.
+
+Replacing a release asset is a delete followed by an upload, with no atomic
+form, so the script downloads every original to `<work>/backup` and checksums it
+into `backup/manifest.tsv` **before** anything is uploaded, re-verifies that
+manifest immediately before the first delete, and can put it all back.
+
+`rpmsign` needs an rpm built with gpg support, which Ubuntu's `rpm` package is
+not. Run it on Fedora, or in a container.
+
+**The work directory must be a bind mount from the host.** It holds the only copy
+of every original once an asset has been replaced, so a container's own
+filesystem — which `--rm` discards the moment the shell exits — would take the
+recovery path with it.
+
+```bash
+mkdir -p ~/proxmox-sleep-resign
+
+podman run --rm -it -v "$PWD:/repo:ro" -v "$HOME/.gnupg:/root/.gnupg" \
+           -v "$HOME/proxmox-sleep-resign:/work" fedora:latest bash
+dnf install -y rpm-sign gnupg2 git-core gh python3
+
+export GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=<token>
+
+# 1. Download, back up, sign and verify — publishes nothing
+/repo/scripts/resign-release-rpms.sh /work
+
+# 2. Replace the published assets
+PUBLISH=1 /repo/scripts/resign-release-rpms.sh /work
+
+# If step 2 goes wrong, put the originals back. Name the release that lost a
+# package; without ONLY_TAGS this reverts every release to its unsigned original.
+RESTORE=1 PUBLISH=1 ONLY_TAGS='v1.1.0' /repo/scripts/resign-release-rpms.sh /work
+```
+
+Re-signing changes each package's bytes, so **the repositories must be rebuilt
+afterwards** or dnf will reject every rpm against the stale checksums:
+
+```bash
+DRY_RUN=0 GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=<token> \
+  scripts/rebuild-package-repos.sh /tmp/repobuild
+```
+
+Keep `~/proxmox-sleep-resign/backup` until a real `dnf install` has been tried
+against the rebuilt repository.
+
+### Verifying it worked
+
+Header inspection alone is easy to get wrong, because which signature-header tag
+an ed25519 signature lands in depends on who signed it: `rpmsign` writes tag 267
+(`DSAHEADER`), while nfpm writes 268 (`RSAHEADER`) and 1002 (`PGP`). A checker
+that looks at only one of them calls correctly signed packages unsigned.
+`scripts/check-rpm-signature.py` reads all four, and the release workflow runs it
+on every build:
+
+```bash
+scripts/check-rpm-signature.py --key <key> ./*.rpm
+```
+
+An actual install under `gpgcheck=1` has no such failure mode, so try one:
+
+```bash
+podman run --rm -it fedora:latest bash -c '
+  cat > /etc/yum.repos.d/proxmox-sleep.repo <<EOF
+[proxmox-sleep]
+name=Proxmox Sleep Manager
+baseurl=https://stuckj.github.io/proxmox-sleep/yum
+enabled=1
+gpgcheck=1
+gpgkey=https://stuckj.github.io/proxmox-sleep/yum/gpg-key.asc
+EOF
+  dnf install -y proxmox-sleep && rpm -qi proxmox-sleep | grep -i "Key ID"'
+```
+
+`dnf install` succeeding under `gpgcheck=1` implies a good signature only while
+gpgcheck is really in force; the `Key ID` check confirms it independently rather
+than inferring it from an exit code.
 
 ### 5. Edit Release Notes (Optional)
 
@@ -126,7 +260,10 @@ You can also trigger a build without creating a tag:
 3. Enter the version number (without `v` prefix)
 4. Click **Run workflow**
 
-This is useful for testing the build process. Note that packages won't be attached to a release, but they'll be available as workflow artifacts.
+This is useful for testing the build process. Packages are not attached to a
+release — they are available as workflow artifacts — and the repositories are
+not republished, because they are built from release assets and a dispatch build
+produces none.
 
 ## Troubleshooting
 
@@ -147,6 +284,12 @@ echo "test" | gpg --armor --sign
 - Check workflow logs for GPG-related errors
 - Verify the key was exported correctly with `gpg --armor --export-secret-keys`
 
+nfpm signs the rpm only when `rpm.signature.key_file` resolves to a readable
+key, and **reports success either way** — a missing secret produces an unsigned
+package and a green build. The `Assert the rpm is signed` step exists to catch
+exactly that, so a failure there means the key or passphrase did not reach nfpm,
+not that the check is wrong.
+
 ### GitHub Pages Not Updating
 
 - Verify the `gh-pages` branch exists and has content
@@ -165,7 +308,15 @@ sudo apt update
 sudo apt install proxmox-sleep
 ```
 
-**YUM/DNF (RHEL/CentOS/Fedora):**
+**APT archive (every published version):**
+```bash
+echo "deb [signed-by=/usr/share/keyrings/proxmox-sleep.gpg] https://github.com/stuckj/proxmox-sleep/releases/download/apt-history/ ./" | sudo tee /etc/apt/sources.list.d/proxmox-sleep-history.list
+sudo apt update
+apt list -a proxmox-sleep
+```
+
+**YUM/DNF (RHEL/CentOS/Fedora)** — requires rpm 4.16 or newer; indexes every
+version:
 ```bash
 sudo tee /etc/yum.repos.d/proxmox-sleep.repo << 'EOF'
 [proxmox-sleep]

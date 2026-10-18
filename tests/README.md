@@ -77,6 +77,37 @@ Tests are grouped by prefix; `tests/run-tests.sh <substring>` runs one group.
 - **host/**, **wake/**, **config/** — SSH sessions, blocking processes/units,
   sleep inhibitors, wake-time bookkeeping, and `EX_CONFIG` (78) validation
   failures.
+- **pkg/** — the release pipeline: rpm signature detection, the YUM `xml:base`
+  rewrite, and the destructive-path guards in the repository scripts.
+
+The `pkg/` group builds its own inputs rather than reading fixtures off disk.
+`tests/rpm-fixture.py` writes a synthetic rpm whose signature header holds
+exactly what a given test needs — a signature in named tags, digests without a
+signature, a non-signature packet, or a truncated file — so what each test
+asserts stays visible in the test rather than in a committed binary.
+
+The tests that drive the release scripts end to end add `mocks/pkg/` to `PATH`
+via `with_pkg_mocks`, which stands in for `gh`, `curl`, `gpg`, `createrepo_c` and
+`rpmsign`.
+
+These mocks deliberately model the tool rather than the caller:
+
+- `mocks/pkg/createrepo_c` emits all three metadata types rather than just
+  `primary`, because `yum_xmlbase.py` rewrites `primary` and copies the others
+  through. It also defaults to **zstd**, as createrepo_c 1.x does, and writes
+  gzip only when `--general-compress-type` asks for it — so dropping that flag
+  fails the tests the way it would fail a release.
+- `mocks/pkg/gh` really stores what `release upload` is given, and a tag in
+  `MOCK_UPLOAD_FAIL_TAGS` has its assets deleted *before* the failure, which is
+  what `--clobber` does when the upload half of a replacement breaks. A mock
+  that failed without deleting would model a kinder API than the real one and
+  hide what the retries exist for.
+
+`mocks/pkg/rpmsign` is a failing stub. The backfill it belongs to is a one-off
+over seven packages that an operator runs by hand and can re-run, so its upload
+path is left to the operator rather than modelled here; the tests that touch the
+script arrange for every package to be signed already, and invoking rpmsign means
+it signed something it should have skipped.
 
 ## Regressions locked in
 
@@ -95,3 +126,9 @@ Several tests exist specifically to keep previously fixed bugs fixed:
 - `wake/corrupt-wake-file-repaired` — a non-numeric wake file used to crash the
   daemon under `set -u`; the repair message must also go to **stderr**, because
   `get_seconds_since_wake`'s stdout is its return value.
+- `pkg/sig-eddsa-tag-267`, `pkg/sig-nfpm-shape` — which signature-header tag an
+  ed25519 signature lands in depends on the signer: `rpmsign` writes `DSAHEADER`
+  (267), nfpm writes `RSAHEADER` (268) and `PGP` (1002). A checker that reads
+  only one of them calls correctly signed packages unsigned.
+- `pkg/sig-tag-alone-not-proof` — the signature tag being present is not proof;
+  its contents have to parse as a signature packet.
