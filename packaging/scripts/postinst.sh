@@ -3,7 +3,7 @@
 
 set -e
 
-# `daemon-reload` and `start` talk to a running systemd, which a container,
+# `daemon-reload` and `restart` talk to a running systemd, which a container,
 # chroot or image build does not have, and under set -e their failure is reported
 # as a failed install. `enable` only writes symlinks, so it runs either way and
 # an image built this way comes up with the units enabled.
@@ -34,10 +34,10 @@ if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 
-    # prerm disables the idle monitor on every upgrade, so anything not
-    # re-enabled here stays off after `apt upgrade`. Accept the multi-instance
-    # format as well as legacy VMID=, or a working install silently stops
-    # sleeping the host.
+    # The prerm of 1.1.0 and earlier disables the idle monitor on upgrade, so on
+    # an upgrade from those anything not re-enabled here stays off. Accept the
+    # multi-instance format as well as legacy VMID=, or a working install
+    # silently stops sleeping the host.
     if [[ -n "${VM_IDS:-}" || -n "${CONTAINER_IDS:-}" ]]; then
         ENABLE_IDLE_MONITOR=1
     elif [[ -n "${VMID:-}" ]] && qm status "$VMID" &>/dev/null; then

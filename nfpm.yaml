@@ -71,15 +71,26 @@ contents:
       mode: 0644
 
 # Maintainer scripts
+#
+# postinst is not listed here: rpm runs the new package's %post and *then* the
+# old package's %preun, so an old prerm that stops and disables the units would
+# undo it on every upgrade. rpm runs it as %posttrans instead (see rpm.scripts
+# below), which comes after both; deb runs it as its postinst.
 scripts:
-  postinstall: packaging/scripts/postinst.sh
   preremove: packaging/scripts/prerm.sh
   postremove: packaging/scripts/postrm.sh
+
+overrides:
+  deb:
+    scripts:
+      postinstall: packaging/scripts/postinst.sh
 
 # RPM-specific settings
 rpm:
   group: System Environment/Daemons
   summary: Proxmox Sleep Manager - VM hibernation and idle monitoring
+  scripts:
+    posttrans: packaging/scripts/postinst.sh
 
   # dnf's gpgcheck=1 verifies a signature stored inside the package, which a
   # signed repomd.xml cannot substitute for -- unlike apt, where a signed

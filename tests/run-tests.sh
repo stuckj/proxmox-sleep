@@ -79,17 +79,23 @@ monitor() { bash "$MONITOR" "$@" 2>&1; }
 # loaded machine startup alone can use all of it, leaving the assertions an
 # empty log. Both `sleep` calls in monitor_loop come after that iteration's
 # decision — including record_wake_time — so the first one in the call log means
-# the decision under test is complete. The ceiling only bounds a daemon that
-# never gets there; the test's own assertions then report the failure.
+# the decision under test is complete.
+#
+# Not getting there is itself a failure, recorded here rather than left to each
+# test: a daemon that dies on its first iteration never suspends, which would
+# otherwise satisfy every "host stays awake" assertion.
 run_monitor_one_cycle() {
     bash "$MONITOR" start >/dev/null 2>&1 &
-    local pid=$! deadline=$(( SECONDS + 30 ))
+    local pid=$! deadline=$(( SECONDS + 30 )) done=0
     while (( SECONDS < deadline )) && kill -0 "$pid" 2>/dev/null; do
-        grep -q '^sleep ' "$MOCK_CALL_LOG" 2>/dev/null && break
+        if grep -q '^sleep ' "$MOCK_CALL_LOG" 2>/dev/null; then done=1; break; fi
         "$REAL_SLEEP" 0.05
     done
+    # The daemon can finish the iteration and exit between two polls.
+    grep -q '^sleep ' "$MOCK_CALL_LOG" 2>/dev/null && done=1
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
+    (( done )) || fail_assert "monitor never completed a loop iteration"
     return 0
 }
 
@@ -1189,7 +1195,7 @@ EOF
     seed_idle_minutes 30
 
     run_monitor_one_cycle
-    assert_contains     "loop actually ran" "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold: 0 minutes"
+    assert_contains     "zero threshold loaded" "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold: 0 minutes"
     assert_not_contains "never suspends"    "$(calls)" "systemctl suspend"
 }
 
@@ -1381,7 +1387,6 @@ EOF
     seed_idle_minutes 30
 
     run_monitor_one_cycle
-    assert_contains     "loop actually ran"   "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold:"
     assert_not_contains "gaming blocks sleep" "$(calls)" "systemctl suspend"
 }
 
