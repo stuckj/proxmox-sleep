@@ -20,15 +20,21 @@ rm -f /tmp/proxmox-idle-monitor.wake
 # - Log files may be useful for debugging
 # - Config file should be preserved for reinstalls (marked as conffile)
 
-echo ""
-echo "Proxmox Sleep Manager has been removed."
-echo ""
-echo "The following files have been preserved:"
-echo "  - /etc/proxmox-sleep.conf (if exists)"
-echo "  - /var/log/proxmox-sleep-manager.log"
-echo "  - /var/log/proxmox-idle-monitor.log"
-echo ""
-echo "Remove them manually if no longer needed."
-echo ""
+# Only on a real removal: this also runs on every upgrade, where saying the
+# package was removed is false.
+case "${1:-remove}" in
+    remove|purge|0)
+        echo ""
+        echo "Proxmox Sleep Manager has been removed."
+        echo ""
+        echo "The following files have been preserved:"
+        echo "  - /etc/proxmox-sleep.conf (if exists)"
+        echo "  - /var/log/proxmox-sleep-manager.log"
+        echo "  - /var/log/proxmox-idle-monitor.log"
+        echo ""
+        echo "Remove them manually if no longer needed."
+        echo ""
+        ;;
+esac
 
 exit 0

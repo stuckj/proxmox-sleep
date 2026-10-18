@@ -50,8 +50,10 @@ if [[ $ENABLE_IDLE_MONITOR -eq 1 ]]; then
     if have_systemctl; then
         systemctl enable proxmox-idle-monitor.service
     fi
+    # restart rather than start: prerm leaves the monitor running across an
+    # upgrade, and a running monitor would otherwise keep the old script.
     if systemd_running; then
-        systemctl start proxmox-idle-monitor.service || true
+        systemctl restart proxmox-idle-monitor.service || true
     fi
 else
     echo ""
