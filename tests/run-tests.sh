@@ -21,6 +21,8 @@ MOCKS="$REPO_ROOT/tests/mocks"
 MONITOR="$REPO_ROOT/proxmox-idle-monitor.sh"
 MANAGER="$REPO_ROOT/proxmox-sleep-manager.sh"
 BASE_PATH="$PATH"
+# Captured before tests/mocks is put on PATH, where `sleep` returns at once.
+REAL_SLEEP="$(command -v sleep)"
 FILTER="${1:-}"
 
 TMPROOT="$(mktemp -d)"
@@ -71,11 +73,24 @@ with_nvidia() { export PATH="$MOCKS/optional:$PATH"; }
 
 monitor() { bash "$MONITOR" "$@" 2>&1; }
 
-# Run the monitor loop briefly. The `sleep` mock returns immediately, so a
-# fraction of a second is many iterations — enough to reach a sleep decision
-# without waiting for CHECK_INTERVAL.
-run_monitor_briefly() {
-    timeout 1 bash "$MONITOR" start >/dev/null 2>&1 || true
+# Run the monitor until its first loop iteration has finished, then stop it.
+#
+# Waits on an event rather than a clock: a fixed window is a race, and on a
+# loaded machine startup alone can use all of it, leaving the assertions an
+# empty log. Both `sleep` calls in monitor_loop come after that iteration's
+# decision — including record_wake_time — so the first one in the call log means
+# the decision under test is complete. The ceiling only bounds a daemon that
+# never gets there; the test's own assertions then report the failure.
+run_monitor_one_cycle() {
+    bash "$MONITOR" start >/dev/null 2>&1 &
+    local pid=$! deadline=$(( SECONDS + 30 ))
+    while (( SECONDS < deadline )) && kill -0 "$pid" 2>/dev/null; do
+        grep -q '^sleep ' "$MOCK_CALL_LOG" 2>/dev/null && break
+        "$REAL_SLEEP" 0.05
+    done
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 0
 }
 
 # Config-error tests run `monitor start` expecting it to exit before the loop.
@@ -1173,7 +1188,7 @@ EOF
     export MOCK_QM_STATUS_100=stopped
     seed_idle_minutes 30
 
-    run_monitor_briefly
+    run_monitor_one_cycle
     assert_contains     "loop actually ran" "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold: 0 minutes"
     assert_not_contains "never suspends"    "$(calls)" "systemctl suspend"
 }
@@ -1212,7 +1227,7 @@ EOF
     printf '%s\n' "$wake_before" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.wake"
     printf '%s\n' "$(( $(date +%s) - 90 ))" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.state"
 
-    run_monitor_briefly
+    run_monitor_one_cycle
 
     local wake_after; wake_after="$(cat "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.wake")"
     assert_contains "declined the sleep" "$(cat "$IDLE_MONITOR_LOG")" "Within wake grace period"
@@ -1313,7 +1328,7 @@ EOF
     export MOCK_QM_STATUS_100=stopped
     seed_idle_minutes 30
 
-    run_monitor_briefly
+    run_monitor_one_cycle
     assert_contains "host is suspended" "$(calls)" "systemctl suspend"
 }
 
@@ -1326,7 +1341,7 @@ EOF
     export MOCK_QM_STATUS_100=stopped
     seed_idle_minutes 2
 
-    run_monitor_briefly
+    run_monitor_one_cycle
     # Anchor on the loop having run: a daemon that exited early would satisfy
     # the negative assertion without testing anything.
     assert_contains     "loop actually ran"  "$(cat "$IDLE_MONITOR_LOG")" "System has been idle for"
@@ -1349,7 +1364,7 @@ EOF
     printf '%s\n' "$(( $(date +%s) - 120 ))" > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.wake"
     printf '%s\n' "$(( $(date +%s) - 90 ))"  > "$PROXMOX_SLEEP_STATE_DIR/idle-monitor.state"
 
-    run_monitor_briefly
+    run_monitor_one_cycle
     assert_not_contains "no suspend just after wake" "$(calls)" "systemctl suspend"
     assert_contains "says why" "$(cat "$IDLE_MONITOR_LOG")" "Within wake grace period"
 }
@@ -1365,7 +1380,7 @@ EOF
     export MOCK_VM_PROCS_100=$'explorer\nsteam'
     seed_idle_minutes 30
 
-    run_monitor_briefly
+    run_monitor_one_cycle
     assert_contains     "loop actually ran"   "$(cat "$IDLE_MONITOR_LOG")" "Idle threshold:"
     assert_not_contains "gaming blocks sleep" "$(calls)" "systemctl suspend"
 }
