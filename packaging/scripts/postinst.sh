@@ -56,6 +56,12 @@ if [[ $ENABLE_IDLE_MONITOR -eq 1 ]]; then
         systemctl restart proxmox-idle-monitor.service || true
     fi
 else
+    # A monitor the user enabled by hand is left running across an upgrade, so
+    # it still needs moving onto the new script. try-restart touches only a
+    # running unit.
+    if systemd_running; then
+        systemctl try-restart proxmox-idle-monitor.service || true
+    fi
     echo ""
     echo "=============================================="
     echo "  Proxmox Sleep Manager installed!"
