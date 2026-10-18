@@ -3,8 +3,17 @@
 
 set -e
 
+# `daemon-reload` and `start` talk to a running systemd, which a container,
+# chroot or image build does not have, and under set -e their failure is reported
+# as a failed install. `enable` only writes symlinks, so it runs either way and
+# an image built this way comes up with the units enabled.
+have_systemctl() { command -v systemctl >/dev/null 2>&1; }
+systemd_running() { [ -d /run/systemd/system ]; }
+
 # Reload systemd to pick up new service files
-systemctl daemon-reload
+if systemd_running; then
+    systemctl daemon-reload
+fi
 
 # Create log files with correct permissions
 touch /var/log/proxmox-sleep-manager.log
@@ -13,7 +22,9 @@ chmod 644 /var/log/proxmox-sleep-manager.log
 chmod 644 /var/log/proxmox-idle-monitor.log
 
 # Always enable the sleep manager - it's safe (only acts on sleep events)
-systemctl enable proxmox-sleep-manager.service
+if have_systemctl; then
+    systemctl enable proxmox-sleep-manager.service
+fi
 
 # Check if config file exists and is valid
 CONFIG_FILE="/etc/proxmox-sleep.conf"
@@ -36,8 +47,12 @@ fi
 
 if [[ $ENABLE_IDLE_MONITOR -eq 1 ]]; then
     echo "Existing valid configuration found. Enabling idle monitor..."
-    systemctl enable proxmox-idle-monitor.service
-    systemctl start proxmox-idle-monitor.service || true
+    if have_systemctl; then
+        systemctl enable proxmox-idle-monitor.service
+    fi
+    if systemd_running; then
+        systemctl start proxmox-idle-monitor.service || true
+    fi
 else
     echo ""
     echo "=============================================="
