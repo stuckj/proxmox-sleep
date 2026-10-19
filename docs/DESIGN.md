@@ -254,8 +254,7 @@ After sourcing:
 ### Proxmox API Communication
 
 ```
-Host Script ──> pvesh get /nodes/{node}/qemu/{vmid}/status/current   (VM CPU)
-            ──> pvesh get /nodes/{node}/lxc/{ctid}/status/current    (CT CPU)
+Host Script ──> pvesh get /cluster/resources --type vm  (VM and CT CPU)
             ──> qm status {vmid}          (VM running check)
             ──> pct status {ctid}         (CT running check)
             ──> qm guest exec {vmid} ...  (Windows queries)
