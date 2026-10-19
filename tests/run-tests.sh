@@ -1608,6 +1608,34 @@ EOF
     assert_contains "blocks sleep"             "$out" "Overall Idle Status: ACTIVE"
 }
 
+test_blocking_process_with_args_is_matched() {
+    write_config <<'EOF'
+VM_IDS="100"
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_RUNNING_PROCS="/usr/bin/python3 /usr/bin/unattended-upgrade -d"
+
+    local out; out="$(monitor check)"
+    assert_contains "detected with arguments" "$out" "Host Blocking Processes: DETECTED"
+    assert_contains "blocks sleep"            "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_blocking_process_name_is_not_a_substring_match() {
+    # Debian runs unattended-upgrade-shutdown permanently; it waits for
+    # shutdown and is not an upgrade in progress.
+    write_config <<'EOF'
+VM_IDS="100"
+HOST_BLOCKING_PROCESSES="unattended-upgrade"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_RUNNING_PROCS="/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal,/bin/bash -c tail /var/log/unattended-upgrades/unattended-upgrade.log,less unattended-upgrade-dpkg.log"
+
+    local out; out="$(monitor check)"
+    assert_contains "daemon not detected" "$out" "Host Blocking Processes: none"
+    assert_contains "idle"                "$out" "Overall Idle Status: IDLE"
+}
+
 test_invalid_action_status_names_the_fallback() {
     write_config <<'EOF'
 VM_IDS="100"
@@ -2561,6 +2589,8 @@ run_test "config/missing-instance"               test_missing_instance_is_a_conf
 run_test "config/ct-hibernate-annotated"         test_container_hibernate_annotated_in_status
 run_test "cycle/duplicate-ids-acted-once"        test_duplicate_ids_acted_on_once
 run_test "host/long-blocking-process-name"       test_long_host_blocking_process_is_matched
+run_test "host/blocking-process-with-args"       test_blocking_process_with_args_is_matched
+run_test "host/blocking-process-not-substring"   test_blocking_process_name_is_not_a_substring_match
 run_test "config/invalid-action-names-fallback"  test_invalid_action_status_names_the_fallback
 run_test "cycle/lingering-guest-process"         test_lingering_guest_process_blocks_hibernate_confirmation
 run_test "flags/non-numeric-monitor"             test_non_numeric_monitor_flag_still_monitors

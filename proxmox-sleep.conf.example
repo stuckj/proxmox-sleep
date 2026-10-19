@@ -46,7 +46,10 @@ WAKE_DELAY=5
 # Grace period after wake — prevent immediate re-sleep
 WAKE_GRACE_PERIOD=60
 
-# Host processes that prevent sleep when running (comma-separated)
+# Host processes that prevent sleep when running (comma-separated).
+# Matched as EXACT program names, not substrings: the executable's basename,
+# or the script's for one run by an interpreter (python3 /usr/bin/unattended-upgrade).
+# "unattended-upgrade" does not match the always-running unattended-upgrade-shutdown.
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
 
 # Systemd units that prevent sleep while active (comma-separated, oneshot only)

@@ -672,14 +672,19 @@ check_host_blocking_processes() {
         return 1
     fi
     IFS=',' read -ra blocking_procs <<< "$HOST_BLOCKING_PROCESSES"
+    local proc name
     for proc in "${blocking_procs[@]}"; do
         proc=$(echo "$proc" | xargs)
         [[ -z "$proc" ]] && continue
+        name=$(printf '%s' "$proc" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
         # -f matches the full command line. Without it pgrep compares against
         # comm, which the kernel truncates to 15 characters, and procps refuses
-        # a longer pattern outright — so the shipped "unattended-upgrade"
-        # default could never match. Same constraint the container path handles.
-        if pgrep -f -- "$proc" > /dev/null 2>&1; then
+        # a longer pattern outright. The name is anchored to the basename of
+        # argv[0], or of argv[1] for a script run by its interpreter
+        # ("python3 /usr/bin/unattended-upgrade"): an unanchored match also
+        # hits the always-running unattended-upgrade-shutdown daemon, and the
+        # host never sleeps.
+        if pgrep -f -- "^([^ ]*/)?$name( |$)|^[^ ]+ ([^ ]*/)?$name( |$)" > /dev/null 2>&1; then
             debug "Found host blocking process: $proc"
             return 0
         fi
