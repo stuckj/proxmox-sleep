@@ -78,6 +78,9 @@ case "$cmd" in
 
     shutdown)
         id="${1:-}"
+        # MOCK_PCT_SHUTDOWN_HANG_<id>=1: never returns, as a real shutdown task does
+        # when the guest is stuck in the kernel. `sleep` is mocked, so block on tail.
+        [[ "$(mock_env "MOCK_PCT_SHUTDOWN_HANG_$id" 0)" == "1" ]] && exec tail -f /dev/null
         rc=$(mock_env "MOCK_PCT_SHUTDOWN_RC_$id" 0)
         [[ "$rc" == "0" ]] && set_status "$id" stopped
         exit "$rc"
@@ -85,6 +88,7 @@ case "$cmd" in
 
     stop)
         id="${1:-}"
+        [[ "$(mock_env "MOCK_PCT_STOP_HANG_$id" 0)" == "1" ]] && exec tail -f /dev/null
         set_status "$id" stopped
         exit "$(mock_env "MOCK_PCT_STOP_RC_$id" 0)"
         ;;

@@ -69,6 +69,20 @@ sanitize_number HIBERNATE_TIMEOUT '^[1-9][0-9]*$' 300
 sanitize_number SHUTDOWN_TIMEOUT  '^[1-9][0-9]*$' 120
 sanitize_number WAKE_DELAY        '^[0-9]+$'      5
 
+# qm/pct can outlive their own --timeout: a shutdown task waiting on a guest
+# stuck in the kernel never returns. The unit's start step has no timeout, so
+# one such guest would keep the host from ever sleeping. Shutdowns get their
+# timeout plus this grace, stops twice the grace. PROXMOX_SLEEP_GUEST_CMD_GRACE
+# exists for the test harness, like PROXMOX_SLEEP_STATE_DIR.
+GUEST_CMD_GRACE="${PROXMOX_SLEEP_GUEST_CMD_GRACE:-30}"
+[[ "$GUEST_CMD_GRACE" =~ ^[1-9][0-9]*$ ]] || GUEST_CMD_GRACE=30
+bounded() {
+    local limit="$1"; shift
+    timeout --kill-after=5 "$limit" "$@"
+}
+guest_shutdown() { bounded $((SHUTDOWN_TIMEOUT + GUEST_CMD_GRACE)) "$1" shutdown "$2" --timeout "$SHUTDOWN_TIMEOUT"; }
+guest_stop()     { bounded $((GUEST_CMD_GRACE * 2)) "$1" stop "$2"; }
+
 # Read a config var with a default (uses bash indirect expansion)
 get_cfg() {
     local var="$1" default="${2:-}"
@@ -224,13 +238,13 @@ hibernate_vm() {
 
     if ! guest_agent_ready "$id"; then
         log "WARNING: Guest agent not responsive for VM $id, attempting shutdown instead"
-        if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+        if guest_shutdown qm "$id" &>/dev/null; then
             log "VM $id shut down cleanly via fallback"
             state_set "vm_${id}" "shutdown"
             return 0
         fi
         log "WARNING: Graceful shutdown failed for VM $id, forcing stop"
-        qm stop "$id" &>/dev/null || true
+        guest_stop qm "$id" &>/dev/null || true
         state_set "vm_${id}" "was_shutdown"
         return 1
     fi
@@ -274,7 +288,7 @@ hibernate_vm() {
     done
 
     log "ERROR: Hibernation timeout after ${HIBERNATE_TIMEOUT}s for VM $id; attempting graceful shutdown"
-    if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+    if guest_shutdown qm "$id" &>/dev/null; then
         log "VM $id shut down cleanly after hibernation timeout"
         state_set "vm_${id}" "shutdown"
         # Hibernation failed, but the VM is cleanly stopped and the host can
@@ -283,7 +297,7 @@ hibernate_vm() {
         return 0
     fi
     log "ERROR: VM $id shutdown failed after hibernation timeout; forcing stop"
-    qm stop "$id" &>/dev/null || true
+    guest_stop qm "$id" &>/dev/null || true
     state_set "vm_${id}" "was_shutdown"
     return 1
 }
@@ -303,14 +317,14 @@ shutdown_vm() {
     # `qm shutdown --timeout N` already blocks until the VM stops or N seconds
     # elapse, so we trust its exit code rather than polling afterwards (which
     # would double the worst-case wait).
-    if qm shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+    if guest_shutdown qm "$id" &>/dev/null; then
         log "VM $id shut down cleanly"
         state_set "vm_${id}" "shutdown"
         return 0
     fi
 
     log "ERROR: VM $id shutdown timeout or failure; forcing stop"
-    qm stop "$id" &>/dev/null || true
+    guest_stop qm "$id" &>/dev/null || true
     state_set "vm_${id}" "was_shutdown"
     return 1
 }
@@ -330,14 +344,14 @@ shutdown_ct() {
     # `pct shutdown --timeout N` already blocks until the container stops or
     # N seconds elapse, so we trust its exit code rather than polling
     # afterwards (which would double the worst-case wait).
-    if pct shutdown "$id" --timeout "$SHUTDOWN_TIMEOUT" &>/dev/null; then
+    if guest_shutdown pct "$id" &>/dev/null; then
         log "Container $id shut down cleanly"
         state_set "ct_${id}" "shutdown"
         return 0
     fi
 
     log "ERROR: Container $id shutdown timeout or failure; forcing stop"
-    pct stop "$id" &>/dev/null || true
+    guest_stop pct "$id" &>/dev/null || true
     state_set "ct_${id}" "was_shutdown"
     return 1
 }

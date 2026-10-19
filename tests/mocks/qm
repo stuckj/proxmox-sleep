@@ -107,6 +107,8 @@ case "$cmd" in
 
     shutdown)
         id="${1:-}"
+        # MOCK_QM_SHUTDOWN_HANG_<id>=1: never returns (see mocks/pct).
+        [[ "$(mock_env "MOCK_QM_SHUTDOWN_HANG_$id" 0)" == "1" ]] && exec tail -f /dev/null
         rc=$(mock_env "MOCK_QM_SHUTDOWN_RC_$id" 0)
         [[ "$rc" == "0" ]] && set_status "$id" stopped
         exit "$rc"
@@ -114,6 +116,7 @@ case "$cmd" in
 
     stop)
         id="${1:-}"
+        [[ "$(mock_env "MOCK_QM_STOP_HANG_$id" 0)" == "1" ]] && exec tail -f /dev/null
         set_status "$id" stopped
         exit "$(mock_env "MOCK_QM_STOP_RC_$id" 0)"
         ;;
