@@ -212,6 +212,13 @@ DRY_RUN=0 GPG_KEY_ID=<key> GPG_PASSPHRASE=<passphrase> GH_TOKEN=<token> \
   scripts/rebuild-package-repos.sh /tmp/repobuild
 ```
 
+For a few minutes after the backfill, the rebuild can stop with
+`FATAL: N asset(s) truncated` even though nothing is. The releases API reports
+the re-signed size straight away, but the download URLs keep serving the cached
+original until GitHub's CDN catches up. The size check is right to refuse: it
+would otherwise index the old bytes' checksums. Wait a few minutes and re-run the
+same command unchanged. No flag fixes it.
+
 Keep `~/proxmox-sleep-resign/backup` until a real `dnf install` has been tried
 against the rebuilt repository.
 
@@ -240,12 +247,18 @@ enabled=1
 gpgcheck=1
 gpgkey=https://stuckj.github.io/proxmox-sleep/yum/gpg-key.asc
 EOF
-  dnf install -y proxmox-sleep && rpm -qi proxmox-sleep | grep -i "Key ID"'
+  dnf install -y --setopt=tsflags=noscripts proxmox-sleep-1.0.0 \
+    && rpm -qi proxmox-sleep | grep -i "Key ID"'
 ```
 
 `dnf install` succeeding under `gpgcheck=1` implies a good signature only while
 gpgcheck is really in force; the `Key ID` check confirms it independently rather
 than inferring it from an exit code.
+
+`tsflags=noscripts` skips the package's install scripts and leaves signature
+checking untouched. It is needed because a container has no running systemd:
+before 1.1.1 the post-install script failed there, so the archive versions this
+check targets would report the whole install as failed.
 
 ### 5. Edit Release Notes (Optional)
 

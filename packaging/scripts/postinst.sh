@@ -3,8 +3,17 @@
 
 set -e
 
+# `daemon-reload` and `restart` talk to a running systemd, which a container,
+# chroot or image build does not have, and under set -e their failure is reported
+# as a failed install. `enable` only writes symlinks, so it runs either way and
+# an image built this way comes up with the units enabled.
+have_systemctl() { command -v systemctl >/dev/null 2>&1; }
+systemd_running() { [ -d /run/systemd/system ]; }
+
 # Reload systemd to pick up new service files
-systemctl daemon-reload
+if systemd_running; then
+    systemctl daemon-reload
+fi
 
 # Create log files with correct permissions
 touch /var/log/proxmox-sleep-manager.log
@@ -13,7 +22,9 @@ chmod 644 /var/log/proxmox-sleep-manager.log
 chmod 644 /var/log/proxmox-idle-monitor.log
 
 # Always enable the sleep manager - it's safe (only acts on sleep events)
-systemctl enable proxmox-sleep-manager.service
+if have_systemctl; then
+    systemctl enable proxmox-sleep-manager.service
+fi
 
 # Check if config file exists and is valid
 CONFIG_FILE="/etc/proxmox-sleep.conf"
@@ -23,10 +34,10 @@ if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 
-    # prerm disables the idle monitor on every upgrade, so anything not
-    # re-enabled here stays off after `apt upgrade`. Accept the multi-instance
-    # format as well as legacy VMID=, or a working install silently stops
-    # sleeping the host.
+    # The prerm of 1.1.0 and earlier disables the idle monitor on upgrade, so on
+    # an upgrade from those anything not re-enabled here stays off. Accept the
+    # multi-instance format as well as legacy VMID=, or a working install
+    # silently stops sleeping the host.
     if [[ -n "${VM_IDS:-}" || -n "${CONTAINER_IDS:-}" ]]; then
         ENABLE_IDLE_MONITOR=1
     elif [[ -n "${VMID:-}" ]] && qm status "$VMID" &>/dev/null; then
@@ -36,9 +47,21 @@ fi
 
 if [[ $ENABLE_IDLE_MONITOR -eq 1 ]]; then
     echo "Existing valid configuration found. Enabling idle monitor..."
-    systemctl enable proxmox-idle-monitor.service
-    systemctl start proxmox-idle-monitor.service || true
+    if have_systemctl; then
+        systemctl enable proxmox-idle-monitor.service
+    fi
+    # restart rather than start: prerm leaves the monitor running across an
+    # upgrade, and a running monitor would otherwise keep the old script.
+    if systemd_running; then
+        systemctl restart proxmox-idle-monitor.service || true
+    fi
 else
+    # A monitor the user enabled by hand is left running across an upgrade, so
+    # it still needs moving onto the new script. try-restart touches only a
+    # running unit.
+    if systemd_running; then
+        systemctl try-restart proxmox-idle-monitor.service || true
+    fi
     echo ""
     echo "=============================================="
     echo "  Proxmox Sleep Manager installed!"
