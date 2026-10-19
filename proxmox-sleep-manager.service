@@ -1,6 +1,9 @@
 [Unit]
 Description=Proxmox Sleep Manager - Hibernate VMs and stop containers on sleep
 Before=sleep.target
+# NVIDIA's units freeze the driver; a container still using the GPU then hangs
+# in the kernel and cannot be stopped. sleep.target alone does not order them.
+Before=nvidia-suspend.service nvidia-hibernate.service nvidia-suspend-then-hibernate.service
 StopWhenUnneeded=yes
 
 [Service]

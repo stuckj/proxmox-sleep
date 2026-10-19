@@ -490,6 +490,56 @@ EOF
     assert_contains "force-stopped VM resumes" "$(calls)" "qm start 100"
 }
 
+test_hung_ct_shutdown_does_not_block_sleep() {
+    # Both the shutdown and the forced stop never return. Unbounded, pre-sleep
+    # would wait forever and the host would never suspend.
+    write_config <<'EOF'
+CONTAINER_IDS="200"
+SHUTDOWN_TIMEOUT=1
+EOF
+    export MOCK_PCT_STATUS_200=running
+    export MOCK_PCT_SHUTDOWN_HANG_200=1
+    export MOCK_PCT_STOP_HANG_200=1
+    export PROXMOX_SLEEP_GUEST_CMD_GRACE=1
+
+    local started=$SECONDS
+    manager pre-sleep > /dev/null
+    local took=$(( SECONDS - started ))
+    (( took < 30 )) || fail_assert "pre-sleep took ${took}s with hung pct calls"
+    assert_contains "force stop attempted"     "$(calls)"      "pct stop 200"
+    assert_contains "still recorded to resume" "$(read_state)" "ct_200=was_shutdown"
+}
+
+test_hung_vm_shutdown_does_not_block_sleep() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_SLEEP_ACTION="shutdown"
+SHUTDOWN_TIMEOUT=1
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_QM_SHUTDOWN_HANG_100=1
+    export MOCK_QM_STOP_HANG_100=1
+    export PROXMOX_SLEEP_GUEST_CMD_GRACE=1
+
+    local started=$SECONDS
+    manager pre-sleep > /dev/null
+    local took=$(( SECONDS - started ))
+    (( took < 30 )) || fail_assert "pre-sleep took ${took}s with hung qm calls"
+    assert_contains "force stop attempted"     "$(calls)"      "qm stop 100"
+    assert_contains "still recorded to resume" "$(read_state)" "vm_100=was_shutdown"
+}
+
+test_unit_orders_before_nvidia_suspend() {
+    # nvidia-suspend freezes the driver; a container still using the GPU then
+    # cannot be stopped. Only an explicit ordering keeps the two apart.
+    local unit; unit="$(cat "$REPO_ROOT/proxmox-sleep-manager.service")"
+    local u
+    for u in nvidia-suspend.service nvidia-hibernate.service nvidia-suspend-then-hibernate.service; do
+        grep -Eq "^Before=(.* )?$u( |$)" <<< "$unit" ||
+            fail_assert "proxmox-sleep-manager.service is not ordered Before=$u"
+    done
+}
+
 test_presleep_exit_code_modes() {
     write_config <<'EOF'
 VM_IDS="100"
@@ -2565,6 +2615,9 @@ run_test "cycle/hibernate-success"               test_hibernate_success_path
 run_test "cycle/hibernate-timeout-upsert"        test_hibernate_timeout_upserts_single_state_line
 run_test "cycle/agent-unresponsive-fallback"     test_guest_agent_unresponsive_falls_back_to_shutdown
 run_test "cycle/forced-stop-is-resumable"        test_forced_stop_is_resumable
+run_test "cycle/hung-ct-shutdown-bounded"        test_hung_ct_shutdown_does_not_block_sleep
+run_test "cycle/hung-vm-shutdown-bounded"        test_hung_vm_shutdown_does_not_block_sleep
+run_test "unit/ordered-before-nvidia-suspend"    test_unit_orders_before_nvidia_suspend
 run_test "cycle/presleep-exit-code-modes"        test_presleep_exit_code_modes
 
 run_test "gaming/vm-exact-match"                 test_vm_gaming_exact_match
