@@ -92,6 +92,8 @@ set_if_unset() {
 # validate_config, so the lists must be safe here and not only at daemon start.
 # What was dropped is recorded so validate_config can still name the typo.
 DUPLICATE_IDS=""
+# Containers whose process list could not be read, warned about once per run.
+declare -A CT_PS_WARNED=()
 dedupe_ids() {
     local var="$1" id out=""
     # shellcheck disable=SC2086  # the ID list is space-separated on purpose
@@ -355,24 +357,21 @@ ct_is_running() {
     [[ "$status" == "running" ]]
 }
 
-get_proxmox_node() {
-    # /etc/pve/nodes lists every node in the cluster, so picking the first
-    # entry returns whichever sorts first — not necessarily this host. The
-    # local hostname is the node name on Proxmox; the directory only confirms it.
-    local node_name=""
-    node_name=$(hostname -s 2>/dev/null || hostname 2>/dev/null)
-    if [[ -n "$node_name" && -d "/etc/pve/nodes/$node_name" ]]; then
-        printf '%s\n' "$node_name"
-        return
+# CPU of a guest as a whole percentage of its allotted cores; -1 if unknown.
+# Read from /cluster/resources, pvestatd's running sample. status/current is
+# no substitute: it reports CPU as the change since the previous call made by
+# the same process, so a fresh pvesh always reads 0.
+get_guest_cpu_usage() {
+    local type="$1" id="$2" json cpu
+    json=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null)
+    cpu=$(printf '%s' "$json" | tr -d '\n\r' | sed 's/}[[:space:]]*,[[:space:]]*{/}\n{/g' \
+        | grep -E "\"id\"[[:space:]]*:[[:space:]]*\"$type/$id\"" \
+        | sed -n 's/.*"cpu"[[:space:]]*:[[:space:]]*\([0-9.eE+-]*\).*/\1/p' | head -1)
+    if [[ -n "$cpu" ]]; then
+        awk -v c="$cpu" 'BEGIN {printf "%.0f", c * 100}'
+    else
+        echo "-1"
     fi
-    if [[ -d /etc/pve/nodes ]]; then
-        local first; first=$(ls -1 /etc/pve/nodes 2>/dev/null | head -n1)
-        if [[ -n "$first" ]]; then
-            printf '%s\n' "$first"
-            return
-        fi
-    fi
-    printf '%s\n' "$node_name"
 }
 
 # ── VM-level check functions (guest-agent / pvesh) ─────────────────────────────
@@ -431,22 +430,7 @@ get_vm_gpu_usage() {
     echo "${usage:--1}"
 }
 
-get_vm_cpu_usage() {
-    local id="$1" cpu json
-    local node_name; node_name=$(get_proxmox_node)
-    if [[ -z "$node_name" ]]; then
-        debug "Failed to get Proxmox node name"
-        echo "-1"
-        return
-    fi
-    json=$(pvesh get "/nodes/$node_name/qemu/$id/status/current" --output-format json 2>/dev/null)
-    cpu=$(echo "$json" | tr -d '\n\r' | sed -n 's/.*"cpu"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)
-    if [[ -n "$cpu" ]]; then
-        echo "$cpu" | awk '{printf "%.0f", $1 * 100}'
-    else
-        echo "-1"
-    fi
-}
+get_vm_cpu_usage() { get_guest_cpu_usage qemu "$1"; }
 
 get_windows_idle_time() {
     local id="$1" result output idle_seconds
@@ -590,20 +574,7 @@ check_vm_power_requests() {
 
 # ── LXC container check functions ──────────────────────────────────────────────
 
-get_ct_cpu_usage() {
-    local id="$1" cpu json
-    local node_name; node_name=$(get_proxmox_node)
-    if [[ -z "$node_name" ]]; then
-        echo "-1"; return
-    fi
-    json=$(pvesh get "/nodes/$node_name/lxc/$id/status/current" --output-format json 2>/dev/null)
-    cpu=$(echo "$json" | tr -d '\n\r' | sed -n 's/.*"cpu"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)
-    if [[ -n "$cpu" ]]; then
-        echo "$cpu" | awk '{printf "%.0f", $1 * 100}'
-    else
-        echo "-1"
-    fi
-}
+get_ct_cpu_usage() { get_guest_cpu_usage lxc "$1"; }
 
 # Host-side nvidia-smi for containers that use the GPU directly.  Degrades
 # gracefully: missing binary, no device, or vfio-pci bound GPU all return -1.
@@ -637,12 +608,22 @@ check_ct_gaming_processes() {
 
     IFS=',' read -ra gaming_procs <<< "$procs"
 
-    # Use `ps -eo args=` (full command line) and extract argv[0]'s basename
-    # per line. The `comm` column is truncated to 15 chars by the kernel,
-    # which would silently miss long process names like "steamwebhelper"
-    # (14 — fits, but any longer name would be cut off).
+    # Only ps runs inside the container, on the PATH pct exec passes
+    # (/sbin:/bin:/usr/sbin:/usr/bin). NixOS keeps ps in its system profile
+    # instead, so that is appended. The marker tells "nothing matched" apart
+    # from "ps never ran", which otherwise both come back empty.
     local processes
-    processes=$(pct exec "$id" -- sh -c 'ps -eo args= 2>/dev/null | awk "{print \$1}" | while IFS= read -r p; do basename "$p"; done' 2>/dev/null) || processes=""
+    processes=$(pct exec "$id" -- sh -c 'PATH="$PATH:/run/current-system/sw/bin"; ps -eo args= && echo __ps_ok__' 2>/dev/null) || processes=""
+    if [[ "$processes" != *__ps_ok__* ]]; then
+        if [[ -z "${CT_PS_WARNED[$id]:-}" ]]; then
+            log "WARNING: cannot list processes in container $id (ps not found?) - gaming process detection is off for it"
+            CT_PS_WARNED[$id]=1
+        fi
+        return 2
+    fi
+    # argv[0]'s basename from `ps -eo args=`: the comm column is truncated to
+    # 15 characters, which would stop longer names matching.
+    processes=$(printf '%s\n' "$processes" | grep -vx '__ps_ok__' | awk '{print $1}' | sed 's#.*/##')
 
     for proc in "${gaming_procs[@]}"; do
         proc=$(echo "$proc" | xargs)
@@ -1294,10 +1275,14 @@ check_once() {
             echo -n "  Gaming Processes: "
             if [[ -z "$gaming_procs" ]]; then
                 echo "DISABLED"
-            elif check_ct_gaming_processes "$id"; then
-                echo "DETECTED"
             else
-                echo "none"
+                local ct_rc=0
+                check_ct_gaming_processes "$id" > /dev/null || ct_rc=$?
+                case "$ct_rc" in
+                    0) echo "DETECTED" ;;
+                    2) echo "UNAVAILABLE (cannot list container processes)" ;;
+                    *) echo "none" ;;
+                esac
             fi
         else
             echo "  Running: NO"

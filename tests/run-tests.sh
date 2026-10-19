@@ -668,6 +668,61 @@ test_per_instance_threshold_override() {
     assert_contains "override raises the bar" "$(monitor check)" "Overall Idle Status: IDLE"
 }
 
+test_vm_cpu_blocks_sleep() {
+    write_config <<'EOF'
+VM_IDS="100"
+VM_100_GAMING_PROCESSES=""
+VM_100_CHECK_POWER_REQUESTS=0
+VM_100_CHECK_USER_IDLE=0
+GPU_VENDOR=nvidia
+EOF
+    export MOCK_QM_STATUS_100=running
+    export MOCK_VM_PROCS_100=$'explorer'
+    export MOCK_VM_CPU_100=0.60
+
+    local out; out="$(monitor check)"
+    assert_contains "VM CPU reported" "$out" "CPU Usage: 60%"
+    assert_contains "busy VM blocks"  "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_guest_cpu_matches_whole_id() {
+    # qemu/10 must not pick up qemu/100's figure, and an exponent is a number.
+    combined_config
+    export MOCK_VM_PROCS_100=$'explorer'
+    export MOCK_CT_PS_200=$'/bin/bash'
+    export MOCK_VM_CPU_10=0.90
+    export MOCK_VM_CPU_100=1.5e-05
+
+    local out; out="$(monitor check)"
+    assert_contains     "own figure read" "$out" "CPU Usage: 0%"
+    assert_not_contains "no prefix match" "$out" "CPU Usage: 90%"
+    assert_not_contains "exponent parsed" "$out" "CPU Usage: 150%"
+}
+
+test_ct_gaming_process_on_nixos() {
+    combined_config
+    export MOCK_VM_PROCS_100=$'explorer'
+    export MOCK_CT_NIXOS_200=1
+    export MOCK_CT_PS_200=$'/run/current-system/sw/bin/bash\n/home/u/.local/share/Steam/ubuntu12_32/steam -srt-logger-opened\n/home/u/.local/share/Steam/ubuntu12_32/reaper SteamLaunch AppId=990080 -- /x/_v2-entry-point'
+    sed -i 's/^CONTAINER_200_GAMING_PROCESSES=.*/CONTAINER_200_GAMING_PROCESSES="reaper"/' "$CONFIG_FILE"
+
+    local out; out="$(monitor check)"
+    assert_contains "reaper found via the NixOS profile" "$out" "Gaming Processes: DETECTED"
+    assert_contains "blocks sleep"                       "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_ct_without_ps_is_reported_unavailable() {
+    combined_config
+    export MOCK_VM_PROCS_100=$'explorer'
+    export MOCK_CT_NO_PS_200=1
+    export MOCK_CT_PS_200=$'steam'
+
+    local out; out="$(monitor check)"
+    assert_contains "status says it could not look" "$out" "Gaming Processes: UNAVAILABLE"
+    grep -q "cannot list processes in container 200" "$IDLE_MONITOR_LOG" ||
+        fail_assert "no warning logged for the unreadable container"
+}
+
 test_monitor_flag_excludes_instance() {
     combined_config
     export MOCK_VM_PROCS_100=$'explorer\nsteam'   # would otherwise block
@@ -2525,6 +2580,10 @@ run_test "combined/vm-idle-ct-gaming"            test_combined_vm_idle_ct_gaming
 run_test "combined/both-idle"                    test_combined_both_idle
 run_test "combined/cpu-thresholds"               test_combined_cpu_thresholds
 run_test "combined/per-instance-threshold"       test_per_instance_threshold_override
+run_test "combined/vm-cpu-blocks"                test_vm_cpu_blocks_sleep
+run_test "combined/guest-cpu-whole-id"           test_guest_cpu_matches_whole_id
+run_test "container/gaming-process-nixos"        test_ct_gaming_process_on_nixos
+run_test "container/no-ps-unavailable"           test_ct_without_ps_is_reported_unavailable
 run_test "combined/monitor-flag-excludes"        test_monitor_flag_excludes_instance
 
 run_test "gpu/ct-absent-binary-not-active"       test_ct_gpu_absent_binary_is_not_active

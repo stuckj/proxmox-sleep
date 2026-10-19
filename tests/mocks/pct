@@ -3,8 +3,8 @@
 # Mock `pct` for the offline test harness. See mocks/qm for the conventions.
 #
 # `pct exec <id> -- sh -c '<script>'` actually *runs* the script locally with a
-# stubbed `ps` on PATH, so the real `ps -eo args=` + awk + basename pipeline in
-# check_ct_gaming_processes is exercised rather than short-circuited.
+# stubbed `ps`, so the real in-container command in check_ct_gaming_processes —
+# its PATH handling included — is exercised rather than short-circuited.
 
 set -uo pipefail
 
@@ -51,8 +51,26 @@ case "$cmd" in
         # Strip the leading `--` separator, then expect `sh -c <script>`.
         [[ "${1:-}" == "--" ]] && shift
         if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+            script="$3"
+            # The simulated container's filesystem decides where `ps` lives:
+            #   default                   on the PATH pct exec passes (Debian etc.)
+            #   MOCK_CT_NIXOS_<id>=1      only under /run/current-system/sw/bin,
+            #                             as on NixOS, whose /usr/bin and /bin
+            #                             hold no ps
+            #   MOCK_CT_NO_PS_<id>=1      nowhere
+            # Nothing outside the container is reachable in the last two, so the
+            # system profile path is pointed at the stub (or at nothing) and the
+            # inherited PATH at a directory that does not exist.
+            ct_path="${MOCK_BIN_DIR:-}:$PATH"
+            if [[ "$(mock_env "MOCK_CT_NIXOS_$id" 0)" == "1" ]]; then
+                ct_path="/nonexistent-ct-bin"
+                script="${script//\/run\/current-system\/sw\/bin/${MOCK_BIN_DIR:-}}"
+            elif [[ "$(mock_env "MOCK_CT_NO_PS_$id" 0)" == "1" ]]; then
+                ct_path="/nonexistent-ct-bin"
+                script="${script//\/run\/current-system\/sw\/bin//nonexistent-ct-profile}"
+            fi
             MOCK_PS_OUTPUT="$(mock_env "MOCK_CT_PS_$id" "")" \
-                PATH="${MOCK_BIN_DIR:-}:$PATH" bash -c "$3"
+                PATH="$ct_path" "$BASH" -c "$script"
             exit $?
         fi
         exit 0

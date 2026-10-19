@@ -372,7 +372,8 @@ proxmox-idle-monitor.sh install-helper
 Then log out and back in to Windows, or check Task Scheduler for "ProxmoxIdleHelper".
 
 ### Container gaming processes not detected
-- Test manually: `pct exec <CTID> -- ps -eo args=`
+- Run `proxmox-idle-monitor.sh check`. `Gaming Processes: UNAVAILABLE` means the container has no `ps` the monitor can find: it looks on the standard paths and, for NixOS, in `/run/current-system/sw/bin`.
+- Test manually: `pct exec <CTID> -- sh -c 'PATH="$PATH:/run/current-system/sw/bin"; ps -eo args='`
 - The monitor extracts the basename of argv[0] from each line (for example, `/usr/bin/steam` becomes `steam`). It uses full command lines rather than `comm` because the kernel truncates `comm` to 15 characters, which would miss longer names.
 - Ensure the names in `CONTAINER_<id>_GAMING_PROCESSES` match those basenames exactly (matching is case-insensitive but not substring).
 

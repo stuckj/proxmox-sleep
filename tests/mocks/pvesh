@@ -1,8 +1,14 @@
 #!/bin/bash
 #
-# Mock `pvesh` for the offline test harness.
-# Only `pvesh get /nodes/<node>/{qemu,lxc}/<id>/status/current` is implemented.
-# CPU is expressed as the API's 0.0-1.0 fraction; the scripts multiply by 100.
+# Mock `pvesh` for the offline test harness. Two read paths are implemented:
+#
+#   pvesh get /cluster/resources --type vm   pvestatd's running sample: one
+#       object per guest, keyed "id":"qemu/<id>" or "id":"lxc/<id>", with CPU
+#       as the API's 0.0-1.0 fraction (MOCK_VM_CPU_<id>, MOCK_CT_CPU_<id>).
+#   pvesh get /nodes/<node>/{qemu,lxc}/<id>/status/current   CPU always 0.
+#       The real call reports CPU as the change since the previous call made by
+#       the same process, so every fresh pvesh process reads 0 — measured on
+#       Proxmox VE 8.4, 2026-10-19, with a container at ~40% CPU.
 
 set -uo pipefail
 
@@ -16,21 +22,27 @@ mock_env() {
 [[ "${1:-}" == "get" ]] || exit 1
 path="${2:-}"
 
-kind=""
-id=""
-case "$path" in
-    */qemu/*/status/current) kind=vm; id="${path#*/qemu/}"; id="${id%%/*}" ;;
-    */lxc/*/status/current)  kind=ct; id="${path#*/lxc/}";  id="${id%%/*}" ;;
-    *) exit 1 ;;
-esac
-
-if [[ "$kind" == "vm" ]]; then
-    cpu=$(mock_env "MOCK_VM_CPU_$id" 0)
-else
-    cpu=$(mock_env "MOCK_CT_CPU_$id" 0)
-fi
-
 # A test can simulate an API failure with MOCK_PVESH_FAIL=1.
 [[ "$(mock_env MOCK_PVESH_FAIL 0)" == "1" ]] && exit 2
 
-printf '{"status":"running","cpu":%s,"mem":123456}\n' "$cpu"
+case "$path" in
+    /cluster/resources)
+        # Every guest any MOCK_ variable mentions, so an unset CPU reads 0
+        # rather than missing — as a running guest does on a real host.
+        ids=$(compgen -v | sed -n -E 's/^MOCK_(VM_CPU|QM_STATUS|CT_CPU|PCT_STATUS)_([0-9]+)$/\1 \2/p' \
+            | sed -E 's/^(VM_CPU|QM_STATUS) /qemu /; s/^(CT_CPU|PCT_STATUS) /lxc /' | sort -u)
+        out="" sep=""
+        while read -r type id; do
+            [[ -z "$type" ]] && continue
+            if [[ "$type" == "qemu" ]]; then cpu=$(mock_env "MOCK_VM_CPU_$id" 0)
+            else cpu=$(mock_env "MOCK_CT_CPU_$id" 0); fi
+            out+="${sep}{\"cpu\":${cpu},\"id\":\"${type}/${id}\",\"maxcpu\":24,\"node\":\"test\",\"status\":\"running\",\"type\":\"${type}\",\"vmid\":${id}}"
+            sep=","
+        done <<< "$ids"
+        printf '[%s]\n' "$out"
+        ;;
+    */qemu/*/status/current|*/lxc/*/status/current)
+        printf '{"status":"running","cpu":0,"mem":123456}\n'
+        ;;
+    *) exit 1 ;;
+esac
