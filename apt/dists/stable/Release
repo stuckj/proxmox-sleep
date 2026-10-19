@@ -5,10 +5,10 @@ Codename: stable
 Architectures: amd64 arm64 all
 Components: main
 Description: Proxmox Sleep Manager packages (current version; see the apt-history release for older versions)
-Date: Mon, 19 Oct 2026 14:30:01 +0000
+Date: Mon, 19 Oct 2026 15:37:32 +0000
 SHA256:
- 87923abb55e5b0b53073a016ad91b7cd87162e8d5d066de439709025e08187e9 808 main/binary-all/Packages
- 445f33a829b3794365c0df33dd56f5f7ca70973ce43ec6793885562c29897e88 540 main/binary-all/Packages.gz
+ d7df68adf56e7a3bf20325a60c5ad9d34121d4039441cb45206f6a9433f7dfd5 808 main/binary-all/Packages
+ 37325d84f27474e270654989e901f2df2d9792566eebe4ae235fa05fe39e37b0 539 main/binary-all/Packages.gz
  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-amd64/Packages
  59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2 20 main/binary-amd64/Packages.gz
  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/binary-arm64/Packages
