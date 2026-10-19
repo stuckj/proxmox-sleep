@@ -240,6 +240,7 @@ CONTAINER_200_MONITOR=1
 CONTAINER_200_SLEEP_ACTION=shutdown  # shutdown | keep_running | ignore
 CONTAINER_200_RESUME_ON_WAKE=1
 CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,proton,gamescope"
+CONTAINER_200_CONNECTION_PORTS="udp:47998,tcp:5900"  # Moonlight/Sunshine, VNC
 ```
 
 ### Legacy Format (Backward Compatible)
@@ -297,6 +298,24 @@ The idle monitor checks multiple signals. **All** must indicate idle for the con
 | Container CPU Usage | Proxmox API (`pvesh`) | Above threshold = active |
 | GPU Usage | Host `nvidia-smi` | Gracefully degrades if unavailable |
 | Gaming Processes | `pct exec` / `ps` | Configurable list |
+| Remote Connections | Container's sockets, read from the host | Configurable ports, off by default |
+
+### Remote Connections to a Container
+
+To keep the host awake while you are connected to a container's desktop, list the
+ports your remote-desktop server uses:
+
+```bash
+CONTAINER_200_CONNECTION_PORTS="udp:47998,tcp:5900"
+```
+
+- `udp:47998` is Sunshine's video stream. Sunshine only opens it while a Moonlight
+  client is streaming, so it covers a Moonlight session even on an idle desktop.
+- `tcp:5900` is VNC. A `tcp:` port counts only while a client is connected, not
+  just because the server is listening.
+
+`proxmox-idle-monitor.sh check` shows `Remote Connections: DETECTED` while a client
+is connected.
 
 ### GPU Detection Notes
 

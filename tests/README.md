@@ -52,9 +52,11 @@ recorded in the call log.
   privileges the test runner does not have; only the `chown` is stubbed.
 - The scripts are invoked as `bash <script>` because the repo does not mark
   them executable (the installer sets mode 0755 at install time).
-- `PROXMOX_SLEEP_STATE_DIR` is the one testability hook in the production
-  scripts. It is not a supported configuration knob: the systemd units run with
-  a clean environment, so only a root-run test can set it.
+- `PROXMOX_SLEEP_STATE_DIR` and `PROXMOX_SLEEP_PROC_DIR` (which stands in for
+  `/proc` when the idle monitor reads a container's sockets) are the only
+  testability hooks in the production scripts. They are not supported
+  configuration knobs: the systemd units run with a clean environment, so only
+  a root-run test can set them.
 
 ## Coverage
 
@@ -72,6 +74,9 @@ Tests are grouped by prefix; `tests/run-tests.sh <substring>` runs one group.
   process names longer than `comm`'s 15-character limit.
 - **combined/** — the host + VM + container idle decision, per-instance
   threshold overrides, and `MONITOR=0`.
+- **connections/** — `CONTAINER_<id>_CONNECTION_PORTS` against `/proc/net`
+  rows copied from a real host: a listener alone is not a client, IPv6, local
+  port only, and unreadable sockets reported as `UNAVAILABLE`, not idle.
 - **gpu/** — the `-1` sentinel never reads as active, `nvidia-smi` is polled
   once per cycle, and the max is taken across multiple GPUs.
 - **host/**, **wake/**, **config/** — SSH sessions, blocking processes/units,

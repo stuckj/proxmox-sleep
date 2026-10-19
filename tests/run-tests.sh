@@ -773,6 +773,126 @@ test_ct_without_ps_is_reported_unavailable() {
         fail_assert "no warning logged for the unreadable container"
 }
 
+# ── Remote connections (CONTAINER_<id>_CONNECTION_PORTS) ──────────────────────
+
+# Container 200's /proc/<pid>/net, pid 4242 as the pct mock reports it. The
+# headers and rows are copied from a live Proxmox 8.4 host: an x11vnc listener
+# on 5900 (0x170C) and Sunshine's stream socket on udp 48000 (0xBB80).
+ct_net_fixture() {
+    local net="$SANDBOX/proc/4242/net"
+    mkdir -p "$net"
+    export PROXMOX_SLEEP_PROC_DIR="$SANDBOX/proc"
+    cat > "$net/tcp" <<'EOF'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+  12: 00000000:170C 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2856171 1 00000000197ffee4 100 0 0 10 0
+EOF
+    cat > "$net/tcp6" <<'EOF'
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   3: 00000000000000000000000000000000:170C 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2856172 1 00000000659571d7 100 0 0 10 0
+EOF
+    cat > "$net/udp" <<'EOF'
+   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+EOF
+    cat > "$net/udp6" <<'EOF'
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+EOF
+}
+
+connection_config() {
+    write_config <<'EOF'
+CONTAINER_IDS="200"
+CONTAINER_200_CONNECTION_PORTS="udp:48000,tcp:5900"
+EOF
+    export MOCK_PCT_STATUS_200=running
+    ct_net_fixture
+}
+
+test_ct_listener_alone_is_not_a_connection() {
+    connection_config
+    local out; out="$(monitor check)"
+    assert_contains "listening VNC is not a client" "$out" "Remote Connections: none"
+    assert_contains "host stays idle"               "$out" "Overall Idle Status: IDLE"
+}
+
+test_ct_established_tcp_blocks_sleep() {
+    connection_config
+    echo '  13: 0A0000C8:170C 0A000005:D2F0 01 00000000:00000000 02:000A7B9C 00000000     0        0 2901122 2 000000003d1e5c27 20 4 30 10 -1' \
+        >> "$SANDBOX/proc/4242/net/tcp"
+    local out; out="$(monitor check)"
+    assert_contains "VNC client detected" "$out" "Remote Connections: DETECTED"
+    assert_contains "blocks sleep"        "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_ct_established_tcp6_blocks_sleep() {
+    connection_config
+    echo '   4: 0000000000000000FFFF00000A0000C8:170C 0000000000000000FFFF00000A000005:D2F0 01 00000000:00000000 02:000A7B9C 00000000     0        0 2901123 2 000000003d1e5c28 20 4 30 10 -1' \
+        >> "$SANDBOX/proc/4242/net/tcp6"
+    assert_contains "client over IPv6 detected" "$(monitor check)" "Remote Connections: DETECTED"
+}
+
+test_ct_established_on_other_port_is_ignored() {
+    # A client connection *from* port 5900 elsewhere, or to an unlisted port,
+    # must not match: only the local port counts.
+    connection_config
+    echo '  14: 0A0000C8:D2F0 0A000005:170C 01 00000000:00000000 02:000A7B9C 00000000     0        0 2901124 2 000000003d1e5c29 20 4 30 10 -1' \
+        >> "$SANDBOX/proc/4242/net/tcp"
+    assert_contains "remote port 5900 ignored" "$(monitor check)" "Remote Connections: none"
+}
+
+test_ct_bound_udp_blocks_sleep() {
+    connection_config
+    echo '27930: 00000000:BB80 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 2896831 2 00000000b43f8d6b 0       ' \
+        >> "$SANDBOX/proc/4242/net/udp"
+    local out; out="$(monitor check)"
+    assert_contains "Moonlight stream detected" "$out" "Remote Connections: DETECTED"
+    assert_contains "blocks sleep"              "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_ct_connection_blocks_sleep_in_daemon() {
+    connection_config
+    echo '27930: 00000000:BB80 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 2896831 2 00000000b43f8d6b 0       ' \
+        >> "$SANDBOX/proc/4242/net/udp"
+    echo 'IDLE_THRESHOLD_MINUTES=5' >> "$CONFIG_FILE"
+    echo 'CHECK_INTERVAL=1' >> "$CONFIG_FILE"
+    echo 'DEBUG=1' >> "$CONFIG_FILE"
+    seed_idle_minutes 10
+    run_monitor_one_cycle
+    assert_not_contains "never suspends" "$(calls)" "systemctl suspend"
+    grep -q "Found a client on udp:48000 in container 200" "$IDLE_MONITOR_LOG" ||
+        fail_assert "daemon did not attribute activity to the connection"
+}
+
+test_ct_connections_disabled_when_unset() {
+    write_config <<'EOF'
+CONTAINER_IDS="200"
+EOF
+    export MOCK_PCT_STATUS_200=running
+    assert_contains "off by default" "$(monitor check)" "Remote Connections: DISABLED"
+}
+
+test_ct_unreadable_sockets_are_reported_unavailable() {
+    connection_config
+    export PROXMOX_SLEEP_PROC_DIR="$SANDBOX/no-such-proc"
+    local out; out="$(monitor check)"
+    assert_contains "status says it could not look" "$out" "Remote Connections: UNAVAILABLE"
+    assert_contains "unknown is not active"         "$out" "Overall Idle Status: IDLE"
+    grep -q "cannot read the sockets of container 200" "$IDLE_MONITOR_LOG" ||
+        fail_assert "no warning logged for the unreadable container"
+}
+
+test_bad_connection_port_is_a_config_error() {
+    local bad out rc
+    for bad in "5900" "tcp:" "sctp:5900" "tcp:65536" "udp:0" "tcp:05900"; do
+        write_config <<EOF
+CONTAINER_IDS="200"
+CONTAINER_200_CONNECTION_PORTS="udp:47998,$bad"
+EOF
+        out="$(timeout 10 bash "$MONITOR" start 2>&1)"; rc=$?
+        assert_rc "'$bad' exits with EX_CONFIG" "$rc" "78"
+        assert_contains "'$bad' is named" "$out" "entry '$bad' must be tcp:<port> or udp:<port>"
+    done
+}
+
 test_monitor_flag_excludes_instance() {
     combined_config
     export MOCK_VM_PROCS_100=$'explorer\nsteam'   # would otherwise block
@@ -2638,6 +2758,15 @@ run_test "combined/guest-cpu-whole-id"           test_guest_cpu_matches_whole_id
 run_test "container/gaming-process-nixos"        test_ct_gaming_process_on_nixos
 run_test "container/no-ps-unavailable"           test_ct_without_ps_is_reported_unavailable
 run_test "combined/monitor-flag-excludes"        test_monitor_flag_excludes_instance
+run_test "connections/ct-listener-not-a-client"  test_ct_listener_alone_is_not_a_connection
+run_test "connections/ct-tcp-established"        test_ct_established_tcp_blocks_sleep
+run_test "connections/ct-tcp6-established"       test_ct_established_tcp6_blocks_sleep
+run_test "connections/ct-other-port-ignored"     test_ct_established_on_other_port_is_ignored
+run_test "connections/ct-udp-bound"              test_ct_bound_udp_blocks_sleep
+run_test "connections/ct-blocks-daemon-sleep"    test_ct_connection_blocks_sleep_in_daemon
+run_test "connections/ct-disabled-when-unset"    test_ct_connections_disabled_when_unset
+run_test "connections/ct-unreadable-unavailable" test_ct_unreadable_sockets_are_reported_unavailable
+run_test "config/bad-connection-port"            test_bad_connection_port_is_a_config_error
 
 run_test "gpu/ct-absent-binary-not-active"       test_ct_gpu_absent_binary_is_not_active
 run_test "gpu/ct-error-not-active"               test_ct_gpu_error_is_not_active
