@@ -52,7 +52,10 @@ WAKE_GRACE_PERIOD=60
 # "unattended-upgrade" does not match the always-running unattended-upgrade-shutdown.
 HOST_BLOCKING_PROCESSES="unattended-upgrade"
 
-# Systemd units that prevent sleep while active (comma-separated, oneshot only)
+# Systemd units that prevent sleep while running (comma-separated). A oneshot
+# service counts for as long as its command runs; a long-running service
+# counts whenever it is up. e.g. add zfs-scrub@<pool>.service to stay awake
+# through a scheduled scrub.
 HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
 
 # Check for systemd sleep inhibitors (1=on, 0=off)

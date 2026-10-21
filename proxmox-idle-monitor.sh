@@ -739,6 +739,14 @@ check_host_blocking_processes() {
     return 1
 }
 
+# A oneshot service such as apt-daily-upgrade is "activating", not "active",
+# for as long as it runs, and is-active exits non-zero for that state.
+unit_is_running() {
+    local state
+    state=$(systemctl is-active "$1" 2>/dev/null) && return 0
+    [[ "$state" == "activating" ]]
+}
+
 check_host_blocking_units() {
     if [[ -z "$HOST_BLOCKING_UNITS" ]]; then
         debug "Host blocking unit detection disabled (empty list)"
@@ -748,7 +756,7 @@ check_host_blocking_units() {
     for unit in "${blocking_units[@]}"; do
         unit=$(echo "$unit" | xargs)
         [[ -z "$unit" ]] && continue
-        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        if unit_is_running "$unit"; then
             debug "Found active blocking unit: $unit"
             return 0
         fi
@@ -763,7 +771,7 @@ get_active_blocking_units() {
     for unit in "${blocking_units[@]}"; do
         unit=$(echo "$unit" | xargs)
         [[ -z "$unit" ]] && continue
-        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        if unit_is_running "$unit"; then
             active_units+=("$unit")
         fi
     done

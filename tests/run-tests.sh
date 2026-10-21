@@ -1008,6 +1008,34 @@ EOF
     assert_contains "blocks sleep"  "$out" "Overall Idle Status: ACTIVE"
 }
 
+test_running_oneshot_unit_blocks_sleep() {
+    # apt-daily-upgrade.service is Type=oneshot: while it runs it is
+    # "activating", which `is-active` reports with a non-zero exit.
+    write_config <<'EOF'
+VM_IDS="100"
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+    export MOCK_ACTIVATING_UNITS="apt-daily-upgrade.service"
+
+    local out; out="$(monitor check)"
+    assert_contains "unit detected"      "$out" "Host Blocking Units: ACTIVE"
+    assert_contains "status names it"    "$out" "  apt-daily-upgrade.service"
+    assert_contains "blocks sleep"       "$out" "Overall Idle Status: ACTIVE"
+}
+
+test_inactive_unit_does_not_block() {
+    write_config <<'EOF'
+VM_IDS="100"
+HOST_BLOCKING_UNITS="apt-daily.service,apt-daily-upgrade.service"
+EOF
+    export MOCK_QM_STATUS_100=stopped
+
+    local out; out="$(monitor check)"
+    assert_contains "nothing running" "$out" "Host Blocking Units: none"
+    assert_contains "host stays idle" "$out" "Overall Idle Status: IDLE"
+}
+
 test_ssh_session_blocks_sleep() {
     write_config <<'EOF'
 VM_IDS="100"
@@ -2776,6 +2804,8 @@ run_test "gpu/ct-queried-once-per-cycle"         test_ct_gpu_queried_once_per_cy
 
 run_test "host/blocking-process"                 test_host_blocking_process_blocks_sleep
 run_test "host/blocking-unit"                    test_host_blocking_unit_blocks_sleep
+run_test "host/blocking-unit-running-oneshot"    test_running_oneshot_unit_blocks_sleep
+run_test "host/blocking-unit-inactive"           test_inactive_unit_does_not_block
 run_test "host/ssh-session"                      test_ssh_session_blocks_sleep
 run_test "host/sleep-inhibitor"                  test_sleep_inhibitor_blocks_sleep
 run_test "host/non-sleep-inhibitor-ignored"      test_non_sleep_inhibitor_does_not_block
