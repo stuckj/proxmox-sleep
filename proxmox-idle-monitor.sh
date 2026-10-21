@@ -57,6 +57,8 @@ if ! install -d -m 0755 -o root -g root "$STATE_DIR"; then
     echo "       This must run as root — try: sudo $0 $*" >&2
     exit 78
 fi
+# Likewise test-only: lets the suite supply a container's /proc/<pid>/net.
+PROC_DIR="${PROXMOX_SLEEP_PROC_DIR:-/proc}"
 STATE_FILE="$STATE_DIR/idle-monitor.state"
 WAKE_TIME_FILE="$STATE_DIR/idle-monitor.wake"
 HOST_BLOCKING_PROCESSES="${HOST_BLOCKING_PROCESSES-}"
@@ -92,8 +94,10 @@ set_if_unset() {
 # validate_config, so the lists must be safe here and not only at daemon start.
 # What was dropped is recorded so validate_config can still name the typo.
 DUPLICATE_IDS=""
-# Containers whose process list could not be read, warned about once per run.
+# Containers whose process list or sockets could not be read, warned about
+# once per run.
 declare -A CT_PS_WARNED=()
+declare -A CT_NET_WARNED=()
 dedupe_ids() {
     local var="$1" id out=""
     # shellcheck disable=SC2086  # the ID list is space-separated on purpose
@@ -330,6 +334,17 @@ validate_config() {
             tval=$(get_cfg "CONTAINER_${id}_${thr}" "0")
             if ! is_positive_int "$tval"; then
                 echo "ERROR: CONTAINER_${id}_${thr}='$tval' must be a non-negative integer" >&2
+                errors=$((errors + 1))
+            fi
+        done
+        local conn_ports conn_entry
+        conn_ports=$(get_cfg "CONTAINER_${id}_CONNECTION_PORTS" "")
+        IFS=',' read -ra conn_entries <<< "$conn_ports"
+        for conn_entry in "${conn_entries[@]}"; do
+            conn_entry=$(echo "$conn_entry" | xargs)
+            [[ -z "$conn_entry" ]] && continue
+            if ! [[ "$conn_entry" =~ ^(tcp|udp):([1-9][0-9]{0,4})$ ]] || (( BASH_REMATCH[2] > 65535 )); then
+                echo "ERROR: CONTAINER_${id}_CONNECTION_PORTS entry '$conn_entry' must be tcp:<port> or udp:<port>" >&2
                 errors=$((errors + 1))
             fi
         done
@@ -632,6 +647,57 @@ check_ct_gaming_processes() {
         # Exact match so "steam" does not also catch "steamwebhelper".
         if echo "$processes" | grep -Fxqi -- "$proc"; then
             debug "Found gaming process in container $id: $proc"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Remote clients on CONTAINER_<id>_CONNECTION_PORTS. The sockets are read from
+# the host through the container's network namespace, so nothing has to exist
+# inside the container.
+#   tcp:N  an established connection to local port N; the listener alone
+#          does not count
+#   udp:N  any socket bound to local port N. UDP has no connection state, so
+#          this only means something for a server that binds the port per
+#          session, as Sunshine does for its stream ports.
+# Returns 0 if a client is found, 1 if not, 2 if the sockets cannot be read.
+check_ct_connections() {
+    local id="$1"
+    local ports; ports=$(get_cfg "CONTAINER_${id}_CONNECTION_PORTS" "")
+    [[ -z "$ports" ]] && return 1
+
+    local pid net
+    pid=$(pct status "$id" --verbose 2>/dev/null | awk '$1 == "pid:" {print $2}')
+    net="$PROC_DIR/$pid/net"
+    if ! is_positive_int "$pid" || [[ ! -r "$net/tcp" || ! -r "$net/udp" ]]; then
+        if [[ -z "${CT_NET_WARNED[$id]:-}" ]]; then
+            log "WARNING: cannot read the sockets of container $id - connection detection is off for it"
+            CT_NET_WARNED[$id]=1
+        fi
+        return 2
+    fi
+
+    local entry proto port files f
+    IFS=',' read -ra entries <<< "$ports"
+    for entry in "${entries[@]}"; do
+        entry=$(echo "$entry" | xargs)
+        [[ -z "$entry" ]] && continue
+        proto="${entry%%:*}"; port="${entry#*:}"
+        files=()
+        for f in "$net/$proto" "$net/${proto}6"; do
+            [[ -r "$f" ]] && files+=("$f")
+        done
+        # Fields: 2 is local_address as HEXIP:HEXPORT, 4 the socket state;
+        # 01 is TCP_ESTABLISHED.
+        if awk -v want="$(printf '%04X' "$port")" -v proto="$proto" '
+            FNR > 1 {
+                n = split($2, a, ":")
+                if (toupper(a[n]) == want && (proto == "udp" || $4 == "01")) { found = 1; exit }
+            }
+            END { exit !found }
+        ' "${files[@]}"; then
+            debug "Found a client on $entry in container $id"
             return 0
         fi
     done
@@ -1017,6 +1083,11 @@ is_system_idle() {
             debug "Gaming processes detected in container $id"
             return 1
         fi
+
+        if check_ct_connections "$id"; then
+            debug "Remote connection active in container $id"
+            return 1
+        fi
     done
 
     debug "System appears idle"
@@ -1281,6 +1352,19 @@ check_once() {
                 case "$ct_rc" in
                     0) echo "DETECTED" ;;
                     2) echo "UNAVAILABLE (cannot list container processes)" ;;
+                    *) echo "none" ;;
+                esac
+            fi
+
+            echo -n "  Remote Connections: "
+            if [[ -z "$(get_cfg "CONTAINER_${id}_CONNECTION_PORTS" "")" ]]; then
+                echo "DISABLED"
+            else
+                local conn_rc=0
+                check_ct_connections "$id" > /dev/null || conn_rc=$?
+                case "$conn_rc" in
+                    0) echo "DETECTED" ;;
+                    2) echo "UNAVAILABLE (cannot read container sockets)" ;;
                     *) echo "none" ;;
                 esac
             fi

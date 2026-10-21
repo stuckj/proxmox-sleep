@@ -144,6 +144,16 @@ VM_100_CHECK_USER_IDLE=1
 # long names like "steamwebhelper" aren't truncated by the kernel's comm limit).
 # CONTAINER_200_GAMING_PROCESSES="steam,steamwebhelper,wine,wineserver,proton,gamescope"
 #
+# Remote connections — prevent sleep while a client is connected to the
+# container. Comma-separated entries, empty (the default) disables the check:
+#   tcp:<port>  an established TCP connection to that port in the container
+#               (e.g. tcp:5900 for VNC, tcp:22 for SSH into the container)
+#   udp:<port>  any socket bound to that UDP port in the container. Only useful
+#               for a server that opens the port per session: Sunshine binds
+#               udp:47998 only while a Moonlight client is streaming.
+# Read from the host, so nothing needs to be installed in the container.
+# CONTAINER_200_CONNECTION_PORTS="udp:47998,tcp:5900"
+#
 # Optional per-instance overrides:
 # CONTAINER_200_CPU_IDLE_THRESHOLD=15
 # CONTAINER_200_GPU_IDLE_THRESHOLD=10

@@ -42,6 +42,11 @@ case "$cmd" in
             echo "Configuration file 'nodes/test/lxc/${1:-}.conf' does not exist" >&2
             exit 2
         fi
+        # --verbose adds more lines, among them `pid: <n>` (the container's
+        # init on the host) while it runs. MOCK_PCT_PID_<id> sets it.
+        if [[ "${2:-}" == "--verbose" && "$(get_status "${1:-}")" == "running" ]]; then
+            printf 'cpus: 24\npid: %s\n' "$(mock_env "MOCK_PCT_PID_${1:-}" 4242)"
+        fi
         printf 'status: %s\n' "$(get_status "${1:-}")"
         ;;
 
